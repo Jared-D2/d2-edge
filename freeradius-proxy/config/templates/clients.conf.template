@@ -1,0 +1,5 @@
+client local-network {
+    ipaddr = ${LOCAL_CLIENT_SUBNET}
+    secret = ${LOCAL_CLIENT_SECRET}
+    require_message_authenticator = yes
+}

@@ -1,0 +1,45 @@
+server default {
+    listen {
+        type = auth
+        ipaddr = *
+        port = 1812
+    }
+    listen {
+        type = acct
+        ipaddr = *
+        port = 1813
+    }
+    authorize {
+        preprocess
+        update request {
+            NAS-Identifier := "${PROXY_ID}"
+            Operator-Name := "${OPERATOR_NAME}"
+        }
+        suffix
+        update control {
+            Proxy-To-Realm := "DEFAULT"
+        }
+    }
+    authenticate {
+    }
+    preacct {
+        preprocess
+        update request {
+            Operator-Name := "${OPERATOR_NAME}"
+        }
+        suffix
+        update control {
+            Proxy-To-Realm := "DEFAULT"
+        }
+    }
+    accounting {
+    }
+    pre-proxy {
+    }
+    post-proxy {
+    }
+    post-auth {
+        Post-Auth-Type REJECT {
+        }
+    }
+}

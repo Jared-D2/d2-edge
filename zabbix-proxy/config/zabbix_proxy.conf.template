@@ -1,0 +1,9 @@
+ProxyMode=__ZABBIX_PROXY_MODE__
+Server=__ZABBIX_SERVER_HOST__
+ServerPort=__ZABBIX_SERVER_PORT__
+Hostname=__ZABBIX_PROXY_NAME__
+DBName=/var/lib/zabbix/zabbix_proxy.db
+LogType=console
+ConfigFrequency=60
+DataSenderFrequency=5
+HeartbeatFrequency=60

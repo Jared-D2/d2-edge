@@ -1,0 +1,68 @@
+@version: 4.2
+@include "scl.conf"
+
+options {
+    keep-hostname(yes);
+    use-dns(no);
+    chain-hostnames(no);
+    create-dirs(yes);
+    stats(level(2));
+    flush-lines(1);
+    time-reopen(10);
+    log-msg-size(65536);
+    threaded(yes);
+    frac-digits(3);
+};
+
+source s_network {
+    udp(ip("0.0.0.0") port(514) flags(store-raw-message));
+    tcp(ip("0.0.0.0") port(514) flags(store-raw-message));
+};
+
+rewrite r_add_metadata {
+    set("__TENANT_ID__"   value("fields.tenant_id"));
+    set("__TENANT_NAME__" value("fields.tenant_name"));
+    set("__SITE_ID__"     value("fields.site_id"));
+    set("__PROXY_ID__"    value("fields.proxy_id"));
+    set("__ENVIRONMENT__" value("fields.environment"));
+    set("${SOURCEIP}"     value("fields.orig_src_ip"));
+    set("${HOST}"         value("fields.orig_host"));
+    set("${PROGRAM}"      value("fields.orig_program"));
+};
+
+destination d_graylog {
+    network(
+        "__GRAYLOG_HOST__"
+        port(__GRAYLOG_PORT__)
+        transport("udp")
+        localip("__TAILSCALE_IP__")
+        template("$(format-json \
+            version=1.1 \
+            host=${HOST} \
+            short_message=${MESSAGE} \
+            timestamp=${UNIXTIME} \
+            _tenant_id=${fields.tenant_id} \
+            _tenant_name=${fields.tenant_name} \
+            _site_id=${fields.site_id} \
+            _proxy_id=${fields.proxy_id} \
+            _environment=${fields.environment} \
+            _orig_src_ip=${fields.orig_src_ip} \
+            _orig_host=${fields.orig_host} \
+            _orig_program=${fields.orig_program})\n")
+    );
+};
+
+destination d_local {
+    file(
+        "/var/log/syslog-proxy/${YEAR}/${MONTH}/${DAY}/messages.log"
+        create-dirs(yes)
+    );
+};
+
+log {
+    source(s_network);
+    rewrite(r_add_metadata);
+    destination(d_graylog);
+    destination(d_local);
+    flags(flow-control);
+};

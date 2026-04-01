@@ -1,0 +1,25 @@
+# Secrets - never commit
+.env
+
+# Rendered configs - generated at deploy time
+freeradius-proxy/config/rendered/
+syslog-proxy/config/syslog-ng.conf
+zabbix-proxy/config/zabbix_proxy.conf
+
+# Runtime files
+syslog-proxy/config/syslog-ng.pid
+syslog-proxy/config/syslog-ng.persist
+syslog-proxy/state/
+syslog-proxy/logs/
+
+# Auvik instance state - unique per deployment
+auvik/etc/
+auvik/config/agent.conf
+auvik/logs/
+
+# Zabbix data
+zabbix-proxy/data/
+zabbix-proxy/logs/
+git
+auvik/config/extra.conf
+auvik/config/*.conf
