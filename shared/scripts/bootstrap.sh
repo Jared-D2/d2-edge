@@ -49,8 +49,7 @@ else
     echo "  OK: $(docker --version)"
 fi
 
-# ─── Configure NTP ────────────────────────────────────────────────────────
-echo ""
+# ─── Configure NTP ────────────────────────────────────────────────────────echo ""
 echo "[5/7] Configuring NTP..."
 cat > /etc/chrony/chrony.conf << 'CHRONY'
 pool time.cloudflare.com iburst
@@ -91,7 +90,6 @@ cat > /etc/logrotate.d/d2-edge-syslog << 'LOGROTATE'
     endscript
 }
 LOGROTATE
-
 # ─── Create required directories ──────────────────────────────────────────
 mkdir -p "${EDGE_DIR}"/{syslog-proxy/{config,logs,state},zabbix-proxy/{config,data,logs},freeradius-proxy/config/{templates,rendered},auvik/{config,etc,logs},shared/scripts}
 
