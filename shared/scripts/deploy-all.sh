@@ -73,6 +73,9 @@ bash "$EDGE_DIR/zabbix-proxy/scripts/render-config.sh"
 bash "$EDGE_DIR/freeradius-proxy/scripts/render-config.sh"
 echo "  OK"
 
+# ─── Ensure data directories exist
+ mkdir -p "$EDGE_DIR"/{syslog-proxy/{config,logs,state},zabbix-proxy/{config,data,logs},freeradius-proxy/config/{templates,rendered},auvik/{config,etc,logs}}
+
 # ─── Bring up remaining containers ────────────────────────────────────────
 echo ""
 echo "[5/6] Starting remaining containers..."
