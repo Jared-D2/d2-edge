@@ -87,3 +87,21 @@ services:
       - ./auvik/config:/config
       - ./auvik/etc:/etc/auvik
       - ./auvik/logs:/usr/share/agent/logs
+
+  # ─── D2 Network Test Agent ────────────────────────────────────────────────
+  d2-agent:
+    build: ./d2-agent
+    container_name: d2-agent
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - tailscale
+    environment:
+      - AGENT_TOKEN=${AGENT_TOKEN}
+      - TENANT_NAME=${TENANT_NAME}
+      - CONTROLLER_URL=${CONTROLLER_URL}
+      - AGENT_ID=${EDGE_HOSTNAME}
+      - TENANT_ID=${TENANT_ID}
+      - HEARTBEAT_INTERVAL=30
+    volumes:
+      - ./d2-agent/app.py:/app/app.py
