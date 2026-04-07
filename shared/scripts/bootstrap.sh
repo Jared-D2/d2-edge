@@ -86,6 +86,7 @@ ufw allow 8080/tcp comment 'D2 agent' >/dev/null
 ufw allow 10021/tcp comment 'Auvik' >/dev/null
 ufw allow 1812/udp comment 'RADIUS auth' >/dev/null
 ufw allow 1813/udp comment 'RADIUS acct' >/dev/null
+ufw allow 5201/tcp comment 'iperf3 P2P' >/dev/null
 ufw allow 9995/udp comment 'Auvik NetFlow' >/dev/null
 ufw allow 9996/udp comment 'Auvik sFlow' >/dev/null
 echo "y" | ufw enable >/dev/null

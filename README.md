@@ -6,11 +6,12 @@ MSP edge stack for customer sites. Runs on Raspberry Pi 5.
 
 | Service | Purpose | LAN Port |
 |---|---|---|
-| tailscale | Secure tunnel to Azure | — |
+| tailscale | Secure tunnel to Azure | ï¿½ |
 | syslog-proxy | Forwards syslog to Graylog | UDP/TCP 514 |
-| zabbix-proxy | Monitoring proxy | — |
+| zabbix-proxy | Monitoring proxy | ï¿½ |
 | freeradius-proxy | RADIUS proxy | UDP 1812/1813 |
-| auvik | Network discovery | — |
+| auvik | Network discovery | â€” |
+| d2-agent | Network test agent | TCP 8080, TCP 5201 (iperf3) |
 
 ## New customer deployment
 
@@ -19,12 +20,12 @@ MSP edge stack for customer sites. Runs on Raspberry Pi 5.
 - Fresh Raspberry Pi OS Lite 64-bit
 - SSH access
 
-### Step 1 — Bootstrap
+### Step 1 ï¿½ Bootstrap
 ```bash
 curl -sSL https://raw.githubusercontent.com/Jared-D2/d2-edge/main/shared/scripts/bootstrap.sh | sudo bash
 ```
 
-### Step 2 — Configure
+### Step 2 ï¿½ Configure
 ```bash
 nano /opt/d2-edge/.env
 ```
@@ -39,9 +40,9 @@ nano /opt/d2-edge/.env
 | RADIUS_SHARED_SECRET | RADIUS proxy secret | (generate randomly) |
 | LOCAL_CLIENT_SECRET | LAN RADIUS client secret | (generate randomly) |
 | LOCAL_CLIENT_SUBNET | Customer LAN subnet | 10.0.0.0/8 |
-| AUVIK_API_KEY | From Auvik portal | — |
+| AUVIK_API_KEY | From Auvik portal | ï¿½ |
 
-### Step 3 — Deploy
+### Step 3 ï¿½ Deploy
 ```bash
 sudo bash /opt/d2-edge/shared/scripts/deploy-all.sh
 ```
