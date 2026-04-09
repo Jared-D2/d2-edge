@@ -2,7 +2,7 @@ services:
 
   # ─── Tailscale sidecar ────────────────────────────────────────────────────
   tailscale:
-    image: tailscale/tailscale:latest
+    image: tailscale/tailscale:v1.92.5
     container_name: tailscale
     hostname: ${EDGE_HOSTNAME}
     restart: unless-stopped
@@ -20,20 +20,32 @@ services:
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=false
     command: >
-      sh -c "tailscaled & sleep 15 && tailscale up
+      sh -c "tailscaled &
+      until tailscale status --json >/dev/null 2>&1; do sleep 2; done;
+      tailscale up
       --authkey=$$TS_AUTHKEY
       --hostname=$$TS_HOSTNAME
       --accept-routes && wait"
+    healthcheck:
+      test: ["CMD", "tailscale", "status", "--json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ─── Syslog proxy ─────────────────────────────────────────────────────────
+  # NOTE: syslog-ng must run as root (PUID/PGID=0) because it binds to
+  # privileged port 514 on the host network with --no-caps. The LinuxServer
+  # s6 init uses PUID/PGID for the abc user; non-root causes EACCES on 514.
   syslog-proxy:
-    image: lscr.io/linuxserver/syslog-ng:latest
+    image: lscr.io/linuxserver/syslog-ng:4.10.2
     container_name: syslog-proxy
     hostname: syslog-proxy
     restart: unless-stopped
     network_mode: host
     depends_on:
-      - tailscale
+      tailscale:
+        condition: service_healthy
     environment:
       - TZ=${TZ}
       - PUID=0
@@ -43,19 +55,32 @@ services:
       - ./syslog-proxy/config:/config
       - ./syslog-proxy/logs:/var/log/syslog-proxy
       - ./syslog-proxy/state:/var/lib/syslog-ng
+    healthcheck:
+      test: ["CMD-SHELL", "syslog-ng-ctl stats --control=/config/syslog-ng.ctl >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # ─── Zabbix proxy ─────────────────────────────────────────────────────────
   zabbix-proxy:
-    image: zabbix/zabbix-proxy-sqlite3:alpine-7.4-latest
+    image: zabbix/zabbix-proxy-sqlite3:alpine-7.4.8
     container_name: zabbix-proxy
     restart: unless-stopped
     network_mode: host
     depends_on:
-      - tailscale
+      tailscale:
+        condition: service_healthy
     volumes:
       - ./zabbix-proxy/config/zabbix_proxy.conf:/etc/zabbix/zabbix_proxy.conf:ro
       - ./zabbix-proxy/data:/var/lib/zabbix
       - ./zabbix-proxy/logs:/var/log/zabbix
+    healthcheck:
+      test: ["CMD-SHELL", "zabbix_proxy -R diaginfo >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # ─── FreeRADIUS proxy ─────────────────────────────────────────────────────
   freeradius-proxy:
@@ -64,17 +89,26 @@ services:
     restart: unless-stopped
     network_mode: host
     depends_on:
-      - tailscale
+      tailscale:
+        condition: service_healthy
     volumes:
       - ./freeradius-proxy/config/rendered/clients.conf:/opt/etc/raddb/clients.conf:ro
       - ./freeradius-proxy/config/rendered/proxy.conf:/opt/etc/raddb/proxy.conf:ro
       - ./freeradius-proxy/config/rendered/policy-operator-name:/opt/etc/raddb/policy-operator-name:ro
       - ./freeradius-proxy/config/rendered/default:/opt/etc/raddb/sites-enabled/default:ro
     command: ["radiusd", "-f", "-l", "stdout"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x radiusd >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # ─── Auvik collector ──────────────────────────────────────────────────────
+  # NOTE: auviknetworks/collector does not publish version tags.
+  # Pinned by digest. To update, pull latest and update the digest.
   auvik:
-    image: auviknetworks/collector:latest
+    image: auviknetworks/collector@sha256:38cd68547ee09c6990eb0023cbdecfc290875196d489fa7f6a58f6e8959ee43d
     container_name: auvik
     hostname: auvik-${EDGE_SITE_ID}
     restart: unless-stopped
@@ -95,7 +129,8 @@ services:
     restart: unless-stopped
     network_mode: host
     depends_on:
-      - tailscale
+      tailscale:
+        condition: service_healthy
     environment:
       - AGENT_TOKEN=${AGENT_TOKEN}
       - TENANT_NAME=${TENANT_NAME}
@@ -105,3 +140,29 @@ services:
       - HEARTBEAT_INTERVAL=30
     volumes:
       - ./d2-agent/app.py:/app/app.py
+
+  # ─── Zabbix agent 2 ───────────────────────────────────────────────────────
+  zabbix-agent2:
+    image: zabbix/zabbix-agent2:alpine-7.4.8
+    container_name: zabbix-agent2
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      tailscale:
+        condition: service_healthy
+    volumes:
+      - /:/rootfs:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ZBX_HOSTNAME=${EDGE_HOSTNAME}
+      - ZBX_METADATA=linux d2-edge raspberry-pi
+      - ZBX_SERVER_HOST=127.0.0.1
+      - ZBX_SERVER_PORT=10051
+    healthcheck:
+      test: ["CMD-SHELL", "zabbix_agent2 -t agent.ping >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

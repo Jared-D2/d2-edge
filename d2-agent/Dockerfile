@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y \
-    iperf3 iputils-ping curl traceroute gnupg lsb-release psmisc procps nmap iproute2 \
+    iperf3 iputils-ping curl traceroute mtr gnupg lsb-release psmisc procps nmap iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Ookla official speedtest CLI

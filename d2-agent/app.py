@@ -299,9 +299,70 @@ def run_ping(target: str, count: int = 10, size: int = 0, df: bool = False, inte
     return result
 
 
-def run_traceroute(target: str) -> dict:
-    ok, raw = run_cmd(["traceroute", "-n", "-m", "20", target], timeout=60)
-    return {"raw": raw, "success": ok}
+def parse_traceroute(raw: str) -> list:
+    """Parse traceroute -n output into structured hops."""
+    hops = []
+    for line in raw.strip().splitlines()[1:]:  # skip header
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            hop_num = int(parts[0])
+        except ValueError:
+            continue
+        ip = None
+        rtts = []
+        for part in parts[1:]:
+            if part == "*":
+                rtts.append(None)
+            elif part == "ms":
+                continue
+            else:
+                try:
+                    rtts.append(float(part))
+                except ValueError:
+                    if "." in part:
+                        ip = part
+        hops.append({
+            "hop": hop_num,
+            "ip": ip,
+            "rtts": rtts,
+            "loss_pct": round(sum(1 for r in rtts if r is None) / max(len(rtts), 1) * 100, 1) if rtts else 100
+        })
+    return hops
+
+
+def run_traceroute(target: str, use_mtr: bool = False, count: int = 10) -> dict:
+    """Run traceroute or mtr and return structured hop data."""
+    if use_mtr:
+        ok, raw = run_cmd(["mtr", "--json", "-c", str(count), "-n", target], timeout=count * 2 + 30)
+        if ok:
+            try:
+                mtr_data = json.loads(raw)
+                hops = []
+                for hub in mtr_data.get("report", {}).get("hubs", []):
+                    hops.append({
+                        "hop": hub.get("count", 0),
+                        "ip": hub.get("host", "*"),
+                        "loss_pct": hub.get("Loss%", 0),
+                        "sent": hub.get("Snt", 0),
+                        "avg": hub.get("Avg", None),
+                        "best": hub.get("Best", None),
+                        "worst": hub.get("Wrst", None),
+                        "stdev": hub.get("StDev", None),
+                        "last": hub.get("Last", None),
+                    })
+                return {"hops": hops, "target": target, "success": True, "type": "mtr", "raw": raw}
+            except json.JSONDecodeError:
+                pass
+        return {"raw": raw, "success": False, "type": "mtr"}
+    else:
+        ok, raw = run_cmd(["traceroute", "-n", "-m", "20", target], timeout=60)
+        hops = parse_traceroute(raw) if ok else []
+        return {"hops": hops, "target": target, "success": ok, "type": "traceroute", "raw": raw}
 
 
 def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) -> dict:
@@ -513,6 +574,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(controller_ws_loop())
         asyncio.create_task(dns_monitor_loop(get_current_ws))
         asyncio.create_task(gateway_monitor_loop(get_current_ws))
+        asyncio.create_task(traceroute_monitor_loop(get_current_ws))
+        asyncio.create_task(http_monitor_loop(get_current_ws))
         log.info("WebSocket push loop started -> %s", CONTROLLER_URL)
     else:
         log.warning("CONTROLLER_URL not set - running in standalone REST mode only")
@@ -557,10 +620,15 @@ def ping(
 
 
 @app.post("/tests/traceroute")
-def traceroute(target: str = Query(...), authorization: str = Header(None)):
+def traceroute(
+    target: str = Query(...),
+    use_mtr: bool = Query(False),
+    count: int = Query(10, ge=1, le=100),
+    authorization: str = Header(None),
+):
     require_auth(authorization)
     validate_target(target)
-    return run_traceroute(target)
+    return run_traceroute(target, use_mtr=use_mtr, count=count)
 
 
 async def controller_ws_loop():
@@ -679,7 +747,10 @@ async def handle_command(ws, raw: str):
             result = await asyncio.get_event_loop().run_in_executor(None, run_iperf_server, duration)
         elif cmd == "traceroute":
             target = validate_target(params.get("target", ""))
-            result = await asyncio.get_event_loop().run_in_executor(None, run_traceroute, target)
+            use_mtr = bool(params.get("use_mtr", False))
+            count = int(params.get("count", 10))
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, run_traceroute, target, use_mtr, count)
         elif cmd == "http_test":
             url = params.get("url", "")
             follow_redirects = bool(params.get("follow_redirects", True))
@@ -707,6 +778,14 @@ async def handle_command(ws, raw: str):
             record_type = params.get("record_type", "A")
             result = await asyncio.get_event_loop().run_in_executor(
                 None, run_dns, target, server, record_type)
+        elif cmd == "config_update":
+            global _traceroute_targets, _http_targets, _config_received
+            _traceroute_targets = params.get("traceroute_targets", [])
+            _http_targets = params.get("http_targets", [])
+            _config_received = True
+            log.info("Config update: %d traceroute, %d http targets", len(_traceroute_targets), len(_http_targets))
+            # No result to send back for config updates
+            return
         else:
             result = {"error": f"Unknown command: {cmd}"}
     except HTTPException as e:
@@ -806,6 +885,132 @@ async def dns_monitor_loop(get_ws_func):
             except Exception:
                 pass
         await asyncio.sleep(DNS_INTERVAL)
+
+
+
+TRACEROUTE_TARGETS = ["8.8.8.8", "1.1.1.1"]
+_tr_env = os.getenv("TRACEROUTE_TARGETS", "")
+if _tr_env:
+    TRACEROUTE_TARGETS = [t.strip() for t in _tr_env.split(",") if t.strip()]
+TRACEROUTE_INTERVAL = int(os.getenv("TRACEROUTE_INTERVAL", "120"))
+
+# Dynamic monitor targets (updated by controller via config_update)
+_traceroute_targets = []  # list of {"target": "x.x.x.x", "label": "...", "interval": 120}
+_http_targets = []  # list of {"url": "https://...", "label": "...", "interval": 300}
+_config_received = False
+
+
+async def traceroute_monitor_loop(get_ws_func):
+    """Periodically run mtr to configured targets and push results."""
+    import uuid as _uuid
+    await asyncio.sleep(20)
+    while True:
+        try:
+            # Use controller-pushed targets if available, else env defaults
+            if _config_received and _traceroute_targets:
+                targets = _traceroute_targets
+            else:
+                targets = [{"target": t.strip(), "interval": TRACEROUTE_INTERVAL}
+                          for t in TRACEROUTE_TARGETS if t.strip()]
+
+            for t in targets:
+                target = t.get("target", t) if isinstance(t, dict) else t
+                try:
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None, run_traceroute, target, True, 5
+                    )
+                    result["timestamp"] = time.time()
+                    ws = get_ws_func()
+                    payload = json.dumps({
+                        "type": "result",
+                        "job_id": str(_uuid.uuid4()),
+                        "agent_id": AGENT_ID,
+                        "tenant_id": TENANT_ID,
+                        "command": "traceroute_monitor",
+                        "result": result,
+                        "timestamp": time.time(),
+                    })
+                    if ws is not None:
+                        await ws.send(payload)
+                    else:
+                        buffer_result("traceroute_monitor", result)
+                except Exception as e:
+                    log.warning("Traceroute monitor error for %s: %s", target, e)
+        except Exception as e:
+            log.warning("Traceroute monitor loop error: %s", e)
+
+        # Use minimum interval from targets, default to TRACEROUTE_INTERVAL
+        min_interval = TRACEROUTE_INTERVAL
+        if _config_received and _traceroute_targets:
+            intervals = [t.get("interval", TRACEROUTE_INTERVAL) for t in _traceroute_targets]
+            if intervals:
+                min_interval = min(intervals)
+        await asyncio.sleep(min_interval)
+
+
+HTTP_TARGETS_DEFAULT = [
+    {"url": "https://www.google.com", "label": "Google"},
+    {"url": "https://login.microsoftonline.com", "label": "Microsoft 365"},
+    {"url": "https://1.1.1.1", "label": "Cloudflare"},
+]
+_http_env = os.getenv("HTTP_TARGETS", "")
+if _http_env:
+    try:
+        HTTP_TARGETS = json.loads(_http_env)
+    except json.JSONDecodeError:
+        HTTP_TARGETS = HTTP_TARGETS_DEFAULT
+else:
+    HTTP_TARGETS = HTTP_TARGETS_DEFAULT
+HTTP_MONITOR_INTERVAL = int(os.getenv("HTTP_MONITOR_INTERVAL", "300"))
+
+
+async def http_monitor_loop(get_ws_func):
+    """Periodically run HTTP tests to configured targets and push results."""
+    import uuid as _uuid
+    await asyncio.sleep(25)
+    while True:
+        try:
+            # Use controller-pushed targets if available, else env defaults
+            if _config_received and _http_targets:
+                targets = _http_targets
+            else:
+                targets = HTTP_TARGETS
+
+            for target in targets:
+                try:
+                    url = target.get("url", target) if isinstance(target, dict) else target
+                    label = target.get("label", url) if isinstance(target, dict) else url
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None, run_http_test, url
+                    )
+                    result["label"] = label
+                    result["timestamp"] = time.time()
+                    ws = get_ws_func()
+                    payload = json.dumps({
+                        "type": "result",
+                        "job_id": str(_uuid.uuid4()),
+                        "agent_id": AGENT_ID,
+                        "tenant_id": TENANT_ID,
+                        "command": "http_monitor",
+                        "result": result,
+                        "timestamp": time.time(),
+                    })
+                    if ws is not None:
+                        await ws.send(payload)
+                    else:
+                        buffer_result("http_monitor", result)
+                except Exception as e:
+                    log.warning("HTTP monitor error for %s: %s", target, e)
+        except Exception as e:
+            log.warning("HTTP monitor loop error: %s", e)
+
+        # Use minimum interval from targets, default to HTTP_MONITOR_INTERVAL
+        min_interval = HTTP_MONITOR_INTERVAL
+        if _config_received and _http_targets:
+            intervals = [t.get("interval", HTTP_MONITOR_INTERVAL) for t in _http_targets if isinstance(t, dict)]
+            if intervals:
+                min_interval = min(intervals)
+        await asyncio.sleep(min_interval)
 
 
 if __name__ == "__main__":

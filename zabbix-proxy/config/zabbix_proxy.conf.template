@@ -1,7 +1,7 @@
-ProxyMode=__ZABBIX_PROXY_MODE__
-Server=__ZABBIX_SERVER_HOST__
-ServerPort=__ZABBIX_SERVER_PORT__
-Hostname=__ZABBIX_PROXY_NAME__
+ProxyMode=0
+Server=${ZABBIX_SERVER_HOST}
+ServerPort=${ZABBIX_SERVER_PORT}
+Hostname=zbx-${TENANT_ID}-${EDGE_SITE_ID}
 DBName=/var/lib/zabbix/zabbix_proxy.db
 LogType=console
 ConfigFrequency=60
