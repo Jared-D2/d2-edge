@@ -5,11 +5,6 @@ set -a
 source /opt/d2-edge/.env
 set +a
 
-OPERATOR_NAME="${TENANT_ID}"
-PROXY_ID="radius-proxy-${TENANT_ID}-${EDGE_SITE_ID}"
-
-export OPERATOR_NAME PROXY_ID
-
 TEMPLATE_DIR="/opt/d2-edge/freeradius-proxy/config/templates"
 OUTPUT_DIR="/opt/d2-edge/freeradius-proxy/config/rendered"
 mkdir -p "$OUTPUT_DIR"

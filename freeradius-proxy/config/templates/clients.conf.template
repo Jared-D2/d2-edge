@@ -1,5 +1,20 @@
+# --- Plain RADIUS clients (UDP) - existing devices ---------------------------
 client local-network {
     ipaddr = ${LOCAL_CLIENT_SUBNET}
     secret = ${LOCAL_CLIENT_SECRET}
     require_message_authenticator = yes
+}
+
+# --- RadSec clients (TCP/TLS) - devices using RADIUS over TLS ---------------
+client radsec-local {
+    ipaddr = ${LOCAL_CLIENT_SUBNET}
+    proto = tcp
+    secret = radsec
+    require_message_authenticator = yes
+
+    limit {
+        max_connections = 16
+        lifetime = 86400
+        idle_timeout = 600
+    }
 }

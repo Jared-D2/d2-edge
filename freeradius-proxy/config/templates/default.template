@@ -1,4 +1,5 @@
 server default {
+    # --- Plain RADIUS (UDP) - existing devices --------------------------------
     listen {
         type = auth
         ipaddr = *
@@ -9,11 +10,38 @@ server default {
         ipaddr = *
         port = 1813
     }
+
+    # --- RadSec (RADIUS over TLS, TCP/2083) -----------------------------------
+    listen {
+        type = auth
+        ipaddr = *
+        port = 2083
+        proto = tcp
+
+        limit {
+            max_connections = 16
+            lifetime = 0
+            idle_timeout = 30
+        }
+
+        tls {
+            private_key_file = /opt/etc/raddb/certs/radsec/radsec.key
+            certificate_file = /opt/etc/raddb/certs/radsec/radsec.crt
+            ca_file = /opt/etc/raddb/certs/radsec/ca-bundle.pem
+            fragment_size = 8192
+            cipher_list = "HIGH"
+            cipher_server_preference = yes
+            tls_min_version = "1.2"
+            tls_max_version = "1.3"
+        }
+    }
     authorize {
         preprocess
         update request {
-            NAS-Identifier := "${PROXY_ID}"
-            Operator-Name := "${OPERATOR_NAME}"
+            Operator-Name := "${TENANT_ID}"
+            # Forward the original device source IP so the central server
+            # can attribute logins to specific devices even through NAT/proxy.
+            Login-IP-Host := "%{Packet-Src-IP-Address}"
         }
         suffix
         update control {
@@ -25,7 +53,8 @@ server default {
     preacct {
         preprocess
         update request {
-            Operator-Name := "${OPERATOR_NAME}"
+            Operator-Name := "${TENANT_ID}"
+            Login-IP-Host := "%{Packet-Src-IP-Address}"
         }
         suffix
         update control {
