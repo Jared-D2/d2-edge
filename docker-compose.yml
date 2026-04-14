@@ -40,6 +40,7 @@ services:
   syslog-proxy:
     image: lscr.io/linuxserver/syslog-ng:4.10.2
     container_name: syslog-proxy
+    profiles: ["${DEPLOY_SYSLOG_PROXY:-enabled}"]
     hostname: syslog-proxy
     restart: unless-stopped
     network_mode: host
@@ -66,6 +67,7 @@ services:
   zabbix-proxy:
     image: zabbix/zabbix-proxy-sqlite3:alpine-7.4.8
     container_name: zabbix-proxy
+    profiles: ["${DEPLOY_ZABBIX_PROXY:-enabled}"]
     restart: unless-stopped
     network_mode: host
     depends_on:
@@ -86,6 +88,7 @@ services:
   freeradius-proxy:
     image: freeradius/freeradius-dev:arm64v8-v3.2.x-alpine
     container_name: freeradius-proxy
+    profiles: ["${DEPLOY_FREERADIUS_PROXY:-enabled}"]
     restart: unless-stopped
     network_mode: host
     depends_on:
@@ -111,6 +114,7 @@ services:
   auvik:
     image: auviknetworks/collector@sha256:38cd68547ee09c6990eb0023cbdecfc290875196d489fa7f6a58f6e8959ee43d
     container_name: auvik
+    profiles: ["${DEPLOY_AUVIK:-enabled}"]
     hostname: auvik-${EDGE_SITE_ID}
     restart: unless-stopped
     network_mode: host
@@ -127,6 +131,7 @@ services:
   d2-agent:
     build: ./d2-agent
     container_name: d2-agent
+    profiles: ["${DEPLOY_D2_AGENT:-enabled}"]
     restart: unless-stopped
     network_mode: host
     depends_on:
@@ -146,6 +151,7 @@ services:
   zabbix-agent2:
     image: zabbix/zabbix-agent2:alpine-7.4.8
     container_name: zabbix-agent2
+    profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped
     network_mode: host
     depends_on:
