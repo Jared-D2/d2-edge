@@ -25,7 +25,7 @@ services:
       tailscale up
       --authkey=$$TS_AUTHKEY
       --hostname=$$TS_HOSTNAME
-      --accept-routes && wait"
+      --advertise-tags=tag:edge-pi --accept-routes && wait"
     healthcheck:
       test: ["CMD", "tailscale", "status", "--json"]
       interval: 30s
