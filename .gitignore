@@ -2,3 +2,5 @@
 *.bak2
 __pycache__/
 freeradius-proxy/certs/
+.env
+*.pre-profiles
