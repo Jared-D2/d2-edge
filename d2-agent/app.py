@@ -31,6 +31,7 @@ AGENT_ID = os.getenv("AGENT_ID", socket.gethostname())
 TENANT_ID = os.getenv("TENANT_ID", "unknown")
 TENANT_NAME = os.getenv("TENANT_NAME", "")
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
+SITE_SLUG = os.getenv("SITE_SLUG", "")
 
 if not AGENT_TOKEN or AGENT_TOKEN == "change-me":
     log.critical("AGENT_TOKEN is not set. Refusing to start.")
@@ -221,6 +222,7 @@ def system_info() -> dict:
         "platform": platform.platform(),
         "ip": get_local_ip(),
         "tailscale_ip": get_tailscale_ip(),
+        "site_slug": SITE_SLUG,
         "public_ip": get_public_ip(),
         "gateway": get_default_gateway(),
         "tenant_name": TENANT_NAME,
