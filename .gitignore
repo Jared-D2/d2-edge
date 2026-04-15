@@ -17,3 +17,5 @@ syslog-proxy/state/
 syslog-proxy/logs/
 zabbix-proxy/config/zabbix_proxy.conf
 zabbix-proxy/config/enc/
+zabbix-proxy/data/
+zabbix-proxy/logs/
