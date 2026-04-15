@@ -142,6 +142,7 @@ services:
       - TENANT_NAME=${TENANT_NAME}
       - CONTROLLER_URL=${CONTROLLER_URL}
       - AGENT_ID=${EDGE_HOSTNAME}
+      - SITE_SLUG=${SITE_SLUG}
       - TENANT_ID=${TENANT_ID}
       - HEARTBEAT_INTERVAL=30
     volumes:
