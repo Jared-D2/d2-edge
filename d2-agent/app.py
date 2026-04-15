@@ -196,6 +196,21 @@ def get_dns_search_domains() -> list:
     return domains
 
 
+def get_tailscale_ip() -> str:
+    """Read current Tailscale IPv4 from tailscale0 interface."""
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ['ip', '-4', '-o', 'addr', 'show', 'tailscale0'],
+            timeout=5, stderr=subprocess.DEVNULL,
+        ).decode()
+        # Example: '587: tailscale0    inet 100.89.124.63/32 scope global ...'
+        m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', out)
+        return m.group(1) if m else ''
+    except Exception:
+        return ''
+
+
 def system_info() -> dict:
     ok, uptime = run_cmd(["cat", "/proc/uptime"])
     uptime_seconds = float(uptime.split()[0]) if ok else None
@@ -205,6 +220,7 @@ def system_info() -> dict:
         "hostname": socket.gethostname(),
         "platform": platform.platform(),
         "ip": get_local_ip(),
+        "tailscale_ip": get_tailscale_ip(),
         "public_ip": get_public_ip(),
         "gateway": get_default_gateway(),
         "tenant_name": TENANT_NAME,
@@ -680,6 +696,7 @@ async def controller_ws_loop():
                     log.info("Flushed %d buffered results", len(flushed_ids))
 
                 async def heartbeat():
+                    last_ts_ip = get_tailscale_ip()
                     while True:
                         await asyncio.sleep(HEARTBEAT_INTERVAL)
                         try:
@@ -688,6 +705,18 @@ async def controller_ws_loop():
                                 "agent_id": AGENT_ID,
                                 "timestamp": time.time(),
                             }))
+                            # Detect Tailscale IP change and report it
+                            cur_ts_ip = get_tailscale_ip()
+                            if cur_ts_ip and cur_ts_ip != last_ts_ip:
+                                log.info("Tailscale IP changed: %s -> %s", last_ts_ip, cur_ts_ip)
+                                await ws.send(json.dumps({
+                                    "type": "ip_change",
+                                    "agent_id": AGENT_ID,
+                                    "tailscale_ip": cur_ts_ip,
+                                    "previous": last_ts_ip,
+                                    "timestamp": time.time(),
+                                }))
+                                last_ts_ip = cur_ts_ip
                         except Exception:
                             break
 
