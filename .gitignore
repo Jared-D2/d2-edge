@@ -4,3 +4,16 @@ __pycache__/
 freeradius-proxy/certs/
 .env
 *.pre-profiles
+
+# Runtime state directories (created at compose up, not tracked)
+auvik/config/
+auvik/etc/
+auvik/logs/
+freeradius-proxy/config/rendered/
+syslog-proxy/config/syslog-ng.conf
+syslog-proxy/config/syslog-ng.persist
+syslog-proxy/config/syslog-ng.pid
+syslog-proxy/state/
+syslog-proxy/logs/
+zabbix-proxy/config/zabbix_proxy.conf
+zabbix-proxy/config/enc/
