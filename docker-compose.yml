@@ -2,7 +2,7 @@ services:
 
   # ─── Tailscale sidecar ────────────────────────────────────────────────────
   tailscale:
-    image: tailscale/tailscale:v1.92.5
+    image: tailscale/tailscale:v1.96.5
     container_name: tailscale
     hostname: ${EDGE_HOSTNAME}
     restart: unless-stopped
@@ -65,7 +65,7 @@ services:
 
   # ─── Zabbix proxy ─────────────────────────────────────────────────────────
   zabbix-proxy:
-    image: zabbix/zabbix-proxy-sqlite3:alpine-7.4.8
+    image: zabbix/zabbix-proxy-sqlite3:alpine-7.4-latest
     container_name: zabbix-proxy
     profiles: ["${DEPLOY_ZABBIX_PROXY:-enabled}"]
     restart: unless-stopped
@@ -146,11 +146,19 @@ services:
       - TENANT_ID=${TENANT_ID}
       - HEARTBEAT_INTERVAL=30
     volumes:
-      - ./d2-agent/app.py:/app/app.py
+      - ./d2-agent/d2-internal-root.crt:/usr/local/share/ca-certificates/d2-internal-root.crt:ro
+      - ./d2-agent/app.py:/app/app.py:ro
+      - ./d2-agent/buffer:/app/buffer
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ─── Zabbix agent 2 ───────────────────────────────────────────────────────
   zabbix-agent2:
-    image: zabbix/zabbix-agent2:alpine-7.4.8
+    image: zabbix/zabbix-agent2:alpine-7.4-latest
     container_name: zabbix-agent2
     profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped

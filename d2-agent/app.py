@@ -37,7 +37,10 @@ if not AGENT_TOKEN or AGENT_TOKEN == "change-me":
     log.critical("AGENT_TOKEN is not set. Refusing to start.")
     sys.exit(1)
 
-BUFFER_DB = "/app/buffer.db"
+BUFFER_DB = "/app/buffer/buffer.db"
+
+BUFFER_MAX_ROWS = int(os.getenv("BUFFER_MAX_ROWS", "20000"))
+BUFFER_RETENTION_DAYS = int(os.getenv("BUFFER_RETENTION_DAYS", "7"))
 
 def init_buffer_db():
     """Initialize local SQLite buffer for outage data retention."""
@@ -50,9 +53,41 @@ def init_buffer_db():
         timestamp REAL NOT NULL,
         flushed   INTEGER DEFAULT 0
     )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flushed_ts ON buffered_results(flushed, timestamp)")
     conn.commit()
     conn.close()
     log.info("Buffer DB initialised at %s", BUFFER_DB)
+
+
+def cleanup_buffer_db():
+    """Delete flushed rows older than retention window; enforce max row count."""
+    import sqlite3 as _sql
+    try:
+        cutoff = time.time() - (BUFFER_RETENTION_DAYS * 86400)
+        conn = _sql.connect(BUFFER_DB)
+        c1 = conn.execute("DELETE FROM buffered_results WHERE flushed=1 AND timestamp<?", (cutoff,))
+        deleted_old = c1.rowcount
+        total = conn.execute("SELECT COUNT(*) FROM buffered_results").fetchone()[0]
+        deleted_cap = 0
+        if total > BUFFER_MAX_ROWS:
+            excess = total - BUFFER_MAX_ROWS
+            c2 = conn.execute(
+                "DELETE FROM buffered_results WHERE id IN (SELECT id FROM buffered_results ORDER BY timestamp ASC LIMIT ?)",
+                (excess,))
+            deleted_cap = c2.rowcount
+        conn.commit()
+        conn.close()
+        if deleted_old or deleted_cap:
+            log.info("Buffer cleanup: %d aged + %d over-cap rows removed", deleted_old, deleted_cap)
+    except Exception as e:
+        log.warning("Buffer cleanup error: %s", e)
+
+
+async def buffer_cleanup_loop():
+    """Run cleanup every hour."""
+    while True:
+        await asyncio.sleep(3600)
+        cleanup_buffer_db()
 
 def buffer_result(command: str, result: dict):
     """Store a monitoring result locally when controller is unreachable."""
@@ -269,9 +304,11 @@ def run_iperf(target: str, duration: int = 10, reverse: bool = False,
 
 
 def run_iperf_server(duration: int = 15) -> dict:
-    """Start iperf3 in server mode for one connection, return this agent IP."""
+    """Start iperf3 in server mode for one connection, return this agent IP.
+
+    Schedules a background cleanup: if no client connects within
+    (duration + 30)s, kill the iperf3 process to avoid port leak."""
     import subprocess as sp
-    import socket as _socket
     local_ip = get_local_ip()
     # Kill any existing iperf3 server holding port 5201
     try:
@@ -282,11 +319,21 @@ def run_iperf_server(duration: int = 15) -> dict:
     cmd = ["iperf3", "-s", "--one-off", "-J"]
     try:
         proc = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.PIPE)
-        # Wait for iperf3 to bind - just sleep, don't connect (connecting would consume the one-off slot)
         time.sleep(1.0)
+        import threading
+        def _reaper(p, deadline):
+            try:
+                p.wait(timeout=deadline)
+            except sp.TimeoutExpired:
+                try:
+                    p.kill()
+                    log.warning("iperf_server PID %d killed - no client connected", p.pid)
+                except Exception:
+                    pass
+        threading.Thread(target=_reaper, args=(proc, duration + 30), daemon=True).start()
         return {"status": "listening", "ip": local_ip, "pid": proc.pid}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": "iperf server start failed"}
 
 
 def run_ping(target: str, count: int = 10, size: int = 0, df: bool = False, interval: float = 1.0) -> dict:
@@ -383,10 +430,24 @@ def run_traceroute(target: str, use_mtr: bool = False, count: int = 10) -> dict:
         return {"hops": hops, "target": target, "success": ok, "type": "traceroute", "raw": raw}
 
 
+URL_ALLOWED_SCHEMES = ("http://", "https://")
+METADATA_HOSTS = ("169.254.169.254", "metadata.google.internal", "fd00:ec2::254")
+
 def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) -> dict:
     """HTTP/HTTPS response time test using curl timing metrics."""
-    if not url.startswith("http"):
+    # Default scheme: https
+    if not url.lower().startswith(URL_ALLOWED_SCHEMES):
+        if "://" in url:
+            return {"url": url, "success": False, "error": "Only http(s) URLs allowed"}
         url = "https://" + url
+    # Block cloud metadata IPs (SSRF defense)
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        host = ""
+    if host.lower() in METADATA_HOSTS:
+        return {"url": url, "success": False, "error": "Metadata IP blocked"}
     # Use seconds-based variables (compatible with all curl versions), convert to ms
     fmt = (
         "dns_s=%{time_namelookup}\n"
@@ -590,6 +651,7 @@ def get_current_ws():
 async def lifespan(app: FastAPI):
     if CONTROLLER_URL:
         asyncio.create_task(controller_ws_loop())
+        asyncio.create_task(buffer_cleanup_loop())
         asyncio.create_task(dns_monitor_loop(get_current_ws))
         asyncio.create_task(gateway_monitor_loop(get_current_ws))
         asyncio.create_task(traceroute_monitor_loop(get_current_ws))
@@ -605,7 +667,15 @@ app = FastAPI(title="D2 Edge Agent", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", **system_info()}
+    """Unauthenticated liveness probe (for Docker healthcheck). No sensitive info."""
+    return {"status": "ok"}
+
+
+@app.get("/info")
+def info(authorization: str = Header(None)):
+    """Full system info — authenticated."""
+    require_auth(authorization)
+    return system_info()
 
 
 @app.post("/tests/speedtest")
@@ -822,7 +892,8 @@ async def handle_command(ws, raw: str):
     except HTTPException as e:
         result = {"error": e.detail}
     except Exception as e:
-        result = {"error": str(e)}
+        log.warning("Command %s failed (%s): %s", cmd, type(e).__name__, e)
+        result = {"error": f"{cmd} failed"}
 
     await ws.send(json.dumps({
         "type": "result",
@@ -1045,4 +1116,4 @@ async def http_monitor_loop(get_ws_func):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+    uvicorn.run(app, host="127.0.0.1", port=8080, log_config=None)

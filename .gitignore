@@ -19,3 +19,7 @@ zabbix-proxy/config/zabbix_proxy.conf
 zabbix-proxy/config/enc/
 zabbix-proxy/data/
 zabbix-proxy/logs/
+
+# Runtime restore points and buffer DB
+*.before-*
+d2-agent/buffer/
