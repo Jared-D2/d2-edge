@@ -364,6 +364,50 @@ def run_ping(target: str, count: int = 10, size: int = 0, df: bool = False, inte
     return result
 
 
+def run_mtu_test(target: str, max_size: int = 1500) -> dict:
+    """Binary-search the largest IPv4 MTU that reaches target with DF set.
+
+    Sends single `ping -M do -c 1 -W 2 -s <payload>` probes where
+    payload = mtu_total - 28 (20 B IP header + 8 B ICMP header).
+    Returns {"target", "mtu_size", "success", "raw", "attempts"}.
+    mtu_size is the total IPv4 MTU (incl. headers); None if unreachable.
+    """
+    lo = 576
+    hi = max(lo, int(max_size))
+    attempts = []
+
+    def probe(total_mtu: int) -> bool:
+        payload = max(0, total_mtu - 28)
+        ok, _ = run_cmd(
+            ["ping", "-c", "1", "-W", "2", "-M", "do", "-s", str(payload), target],
+            timeout=5,
+        )
+        attempts.append({"mtu": total_mtu, "payload": payload, "success": ok})
+        return ok
+
+    # If the lowest MTU doesn't work, target is unreachable (or not ICMP-responsive).
+    if not probe(lo):
+        return {"target": target, "mtu_size": None, "success": False,
+                "raw": "target unreachable at lo MTU", "attempts": attempts}
+
+    # Fast path: usually the full MTU works.
+    if probe(hi):
+        return {"target": target, "mtu_size": hi, "success": True,
+                "raw": f"pmtu={hi} (max)", "attempts": attempts}
+
+    # Binary search between lo (works) and hi (fails).
+    best = lo
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if probe(mid):
+            lo = mid
+            best = mid
+        else:
+            hi = mid
+    return {"target": target, "mtu_size": best, "success": True,
+            "raw": f"pmtu={best}", "attempts": attempts}
+
+
 def parse_traceroute(raw: str) -> list:
     """Parse traceroute -n output into structured hops."""
     hops = []
@@ -879,6 +923,12 @@ async def handle_command(ws, raw: str):
             record_type = params.get("record_type", "A")
             result = await asyncio.get_event_loop().run_in_executor(
                 None, run_dns, target, server, record_type)
+        elif cmd == "mtu_test":
+            target = validate_target(params.get("target", ""))
+            max_size = int(params.get("max_size", 1500))
+            max_size = max(576, min(max_size, 9000))
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, run_mtu_test, target, max_size)
         elif cmd == "config_update":
             global _traceroute_targets, _http_targets, _config_received
             _traceroute_targets = params.get("traceroute_targets", [])
