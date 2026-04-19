@@ -33,7 +33,7 @@ rewrite r_add_metadata {
 destination d_graylog {
     network(
         "${GRAYLOG_HOST}"
-        port(${GRAYLOG_PORT})
+        port(12203)
         transport("tcp")
         so-keepalive(yes)
         template("$(format-json \

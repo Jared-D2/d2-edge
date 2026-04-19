@@ -29,11 +29,11 @@ validate_rendered() {
 # Restrict envsubst to OUR variables so syslog-ng's own ${HOST}, ${MESSAGE},
 # ${SOURCEIP}, ${PROGRAM}, ${R_UNIXTIME}, ${YEAR}/${MONTH}/${DAY} macros
 # stay intact for syslog-ng to resolve at runtime.
-SYSLOG_VARS='$TENANT_ID $TENANT_NAME $EDGE_SITE_ID $ENVIRONMENT $GRAYLOG_HOST $GRAYLOG_PORT'
+SYSLOG_VARS='$TENANT_ID $TENANT_NAME $EDGE_SITE_ID $ENVIRONMENT $GRAYLOG_HOST'
 envsubst "$SYSLOG_VARS"     < "${EDGE_DIR}/syslog-proxy/config/syslog-ng.conf.template"     > "${EDGE_DIR}/syslog-proxy/config/syslog-ng.conf"
 # Validate: every ${TENANT_ID}-style placeholder we ship should be gone.
 # syslog-ng's own macros like ${HOST} are fine; we check only for our keys.
-for v in TENANT_ID TENANT_NAME EDGE_SITE_ID ENVIRONMENT GRAYLOG_HOST GRAYLOG_PORT; do
+for v in TENANT_ID TENANT_NAME EDGE_SITE_ID ENVIRONMENT GRAYLOG_HOST; do
     if grep -q "\${$v}" "${EDGE_DIR}/syslog-proxy/config/syslog-ng.conf"; then
         echo "[ERROR] syslog-ng.conf missing substitution for $v"; exit 1
     fi
