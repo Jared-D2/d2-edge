@@ -65,7 +65,7 @@ services:
 
   # ─── Zabbix proxy ─────────────────────────────────────────────────────────
   zabbix-proxy:
-    image: zabbix/zabbix-proxy-sqlite3:alpine-7.4-latest
+    image: zabbix/zabbix-proxy-sqlite3:alpine-7.4-latest@sha256:3916f37cde80a125c5ec92c4d4c4225dd58cb1fbaad7bb8154b6b010b3a245a8
     container_name: zabbix-proxy
     profiles: ["${DEPLOY_ZABBIX_PROXY:-enabled}"]
     restart: unless-stopped
@@ -86,7 +86,7 @@ services:
 
   # ─── FreeRADIUS proxy ─────────────────────────────────────────────────────
   freeradius-proxy:
-    image: freeradius/freeradius-dev:arm64v8-v3.2.x-alpine
+    image: freeradius/freeradius-dev:arm64v8-v3.2.x-alpine@sha256:5769ddb3dcc1620f7140e90f73a04e02cbb66b8e8149984c7c96ed5e49d4bb18
     container_name: freeradius-proxy
     profiles: ["${DEPLOY_FREERADIUS_PROXY:-enabled}"]
     restart: unless-stopped
@@ -158,7 +158,7 @@ services:
 
   # ─── Zabbix agent 2 ───────────────────────────────────────────────────────
   zabbix-agent2:
-    image: zabbix/zabbix-agent2:alpine-7.4-latest
+    image: zabbix/zabbix-agent2:alpine-7.4-latest@sha256:60a07c67c9bf8ca6eeabbed0ab211a8587e2ea55807cdeb92481b2909a9449a0
     container_name: zabbix-agent2
     profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped
@@ -187,7 +187,7 @@ services:
   # Serves the internal CA root cert for device onboarding.
   # Devices pull: http://<PI_LAN_IP>:8888/certs/d2tech-root-ca.crt
   cert-server:
-    image: nginx:alpine
+    image: nginx:alpine@sha256:0c5d96dc61c5c3646c1284495a1b32914f0f7f55fa4b7dcf5600b60e8c969a7b
     container_name: cert-server
     restart: unless-stopped
     network_mode: host
