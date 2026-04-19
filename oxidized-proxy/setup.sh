@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-PROXY_USER="oxidized-proxy"
+PROXY_USER="svc_oxidized_proxy"
 PROXY_HOME="/home/${PROXY_USER}"
 KEY_FILE="${1:-oxidized-proxy/authorized_keys.pub}"
 
@@ -60,4 +60,4 @@ echo "  Port forwarding: any host, port 22 only"
 echo "  authorized_keys: $AUTH_KEYS"
 echo ""
 echo "Test from the Oxidized server:"
-echo "  ssh -o ProxyJump=oxidized-proxy@<pi-tailscale-ip> user@<device-ip>"
+echo "  ssh -o ProxyJump=svc_oxidized_proxy@<pi-tailscale-ip> user@<device-ip>"

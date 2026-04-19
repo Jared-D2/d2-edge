@@ -1,5 +1,5 @@
 #!/bin/bash
-# Idempotent. Creates the oxidized-proxy bastion user on this Pi and
+# Idempotent. Creates the svc_oxidized_proxy bastion user (renamed 2026-04-20 from oxidized-proxy to disambiguate from Oxidized's svc_oxidized device-login account). on this Pi and
 # installs the Oxidized SSH public key with hardened restrictions:
 # - restrict: deny everything by default
 # - port-forwarding: allow TCP forwarding only
@@ -7,7 +7,7 @@
 # - from="10.255.255.68": only accept connections from the Oxidized VM
 set -e
 
-USER_NAME=oxidized-proxy
+USER_NAME=svc_oxidized_proxy
 OXIDIZED_IP=10.255.255.68
 PUBKEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL1m+QZVi53JtZLUNRQpIYqpiGuZyv4m42hG2d6M2Z5k oxidized-proxy@oxidized'
 RESTRICTIONS='restrict,port-forwarding,permitopen="*:22",from="'$OXIDIZED_IP'"'
