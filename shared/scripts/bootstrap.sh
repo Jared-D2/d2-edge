@@ -150,6 +150,7 @@ echo ""
 echo "[8/8] Setting up .env..."
 if [[ -f "${EDGE_DIR}/.env" ]]; then
     echo "  .env already exists — skipping"
+    chmod 600 "${EDGE_DIR}/.env"
 else
     cp "${EDGE_DIR}/.env.template" "${EDGE_DIR}/.env"
     chmod 600 "${EDGE_DIR}/.env"

@@ -6,7 +6,7 @@ options {
     use-dns(no);
     chain-hostnames(no);
     create-dirs(yes);
-    stats(level(2));
+    stats(level(1));
     flush-lines(1);
     time-reopen(10);
     log-msg-size(65536);
