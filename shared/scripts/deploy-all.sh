@@ -69,9 +69,7 @@ done
 # --- Render configs -------------------------------------------------------
 echo ""
 echo "[4/6] Rendering configs..."
-bash "$EDGE_DIR/syslog-proxy/scripts/render-config.sh"
-bash "$EDGE_DIR/zabbix-proxy/scripts/render-config.sh"
-bash "$EDGE_DIR/freeradius-proxy/scripts/render-config.sh"
+bash "$EDGE_DIR/render-configs.sh"
 echo "  OK"
 
 # --- Ensure directories exist with correct permissions --------------------

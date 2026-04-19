@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EDGE_DIR="/opt/d2-edge"
+EDGE_DIR=/opt/d2-edge
 
 echo "========================================"
-echo " D2 Edge Appliance — Update"
+echo " D2 Edge Appliance â€” Update"
 echo "========================================"
 
 if [[ $EUID -ne 0 ]]; then
@@ -12,27 +12,29 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-echo ""
-echo "[1/3] Pulling latest from Git..."
+echo
+echo "[1/4] Pulling latest from Git..."
 cd "$EDGE_DIR"
 git pull
 echo "  OK"
 
-echo ""
-echo "[2/3] Re-rendering configs..."
-bash "$EDGE_DIR/syslog-proxy/scripts/render-config.sh"
-bash "$EDGE_DIR/zabbix-proxy/scripts/render-config.sh"
-bash "$EDGE_DIR/freeradius-proxy/scripts/render-config.sh"
+echo
+echo "[2/4] Re-rendering configs..."
+bash "$EDGE_DIR/render-configs.sh"
 echo "  OK"
 
-echo ""
-echo "[3/3] Restarting containers..."
+echo
+echo "[3/4] Building d2-agent image..."
 cd "$EDGE_DIR"
-docker compose down
-docker compose up -d
+docker compose build d2-agent --pull
 echo "  OK"
 
-echo ""
+echo
+echo "[4/4] Recreating containers..."
+docker compose up -d --force-recreate
+echo "  OK"
+
+echo
 echo "========================================"
 echo " Update complete"
 echo "========================================"

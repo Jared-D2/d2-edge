@@ -31,6 +31,10 @@ AGENT_ID = os.getenv("AGENT_ID", socket.gethostname())
 TENANT_ID = os.getenv("TENANT_ID", "unknown")
 TENANT_NAME = os.getenv("TENANT_NAME", "")
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
+# Optional command allowlist. Empty env = allow all (default).
+# Example: ALLOWED_COMMANDS=ping,traceroute,dns to lock a site-specific Pi down.
+_allowed_env = os.getenv("ALLOWED_COMMANDS", "").strip()
+ALLOWED_COMMANDS = set(c.strip() for c in _allowed_env.split(",") if c.strip()) if _allowed_env else None
 NETBOX_SITE_SLUG = os.getenv("NETBOX_SITE_SLUG", "")
 
 if not AGENT_TOKEN or AGENT_TOKEN == "change-me":
@@ -476,6 +480,21 @@ def run_traceroute(target: str, use_mtr: bool = False, count: int = 10) -> dict:
 
 URL_ALLOWED_SCHEMES = ("http://", "https://")
 METADATA_HOSTS = ("169.254.169.254", "metadata.google.internal", "fd00:ec2::254")
+# SSRF: always block loopback + link-local. Customer LAN (RFC1918) is
+# intentionally permitted because probing customer infra is this agent's purpose.
+import ipaddress as _ipaddr
+def _is_blocked_host(host: str) -> bool:
+    if not host:
+        return False
+    if host.lower() in METADATA_HOSTS:
+        return True
+    try:
+        ip = _ipaddr.ip_address(host)
+        if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            return True
+    except ValueError:
+        pass
+    return False
 
 def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) -> dict:
     """HTTP/HTTPS response time test using curl timing metrics."""
@@ -490,8 +509,8 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
         host = urlparse(url).hostname or ""
     except Exception:
         host = ""
-    if host.lower() in METADATA_HOSTS:
-        return {"url": url, "success": False, "error": "Metadata IP blocked"}
+    if _is_blocked_host(host):
+        return {"url": url, "success": False, "error": "Host blocked (metadata / loopback / link-local)"}
     # Use seconds-based variables (compatible with all curl versions), convert to ms
     fmt = (
         "dns_s=%{time_namelookup}\n"
@@ -864,6 +883,19 @@ async def handle_command(ws, raw: str):
 
     log.info("Received command: %s (job_id=%s)", cmd, job_id)
 
+    if ALLOWED_COMMANDS is not None and cmd not in ALLOWED_COMMANDS and cmd != "config_update":
+        log.warning("Command %s rejected by ALLOWED_COMMANDS allowlist", cmd)
+        await ws.send(json.dumps({
+            "type": "result",
+            "job_id": job_id,
+            "agent_id": AGENT_ID,
+            "tenant_id": TENANT_ID,
+            "command": cmd,
+            "result": {"error": "Command not permitted on this agent"},
+            "timestamp": time.time(),
+        }))
+        return
+
     result = {}
     try:
         if cmd == "speedtest":
@@ -918,8 +950,10 @@ async def handle_command(ws, raw: str):
             result = await asyncio.get_event_loop().run_in_executor(
                 None, run_port_check, host, str(port), scan_type, service_detection, timing, top_ports)
         elif cmd == "dns":
-            target = params.get("target", "google.com")
+            target = validate_target(params.get("target", "google.com"))
             server = params.get("server", "")
+            if server:
+                validate_target(server)
             record_type = params.get("record_type", "A")
             result = await asyncio.get_event_loop().run_in_executor(
                 None, run_dns, target, server, record_type)

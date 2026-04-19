@@ -147,7 +147,6 @@ services:
       - HEARTBEAT_INTERVAL=30
     volumes:
       - ./d2-agent/d2-internal-root.crt:/usr/local/share/ca-certificates/d2-internal-root.crt:ro
-      - ./d2-agent/app.py:/app/app.py:ro
       - ./d2-agent/buffer:/app/buffer
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://127.0.0.1:8080/health || exit 1"]
