@@ -17,9 +17,26 @@ fi
 # ─── Hostname ─────────────────────────────────────────────────────────────
 echo ""
 echo "[1/8] Hostname setup..."
-read -rp "  Enter hostname for this Pi (e.g. d2-customer-site01): " NEW_HOSTNAME
+# Validate: lowercase letters / digits / hyphens, must start+end alnum, <=63 chars.
+# Rejects empty input and accidental paste of command syntax.
+HOSTNAME_RE='^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$'
+while true; do
+    read -rp "  Enter hostname for this Pi (e.g. d2-customer-site01): " NEW_HOSTNAME
+    if [[ "$NEW_HOSTNAME" =~ $HOSTNAME_RE ]]; then
+        break
+    fi
+    echo "  Invalid. Must be lowercase letters/digits/hyphens, <=63 chars (e.g. d2001-nw-pi01)."
+done
+OLD_HOSTNAME=$(hostname)
 hostnamectl set-hostname "${NEW_HOSTNAME}"
-echo "  Set to: ${NEW_HOSTNAME}"
+# /etc/hosts: replace the 127.0.1.1 line so sudo does not log
+# 'unable to resolve host' on every call.
+if grep -q "^127\.0\.1\.1" /etc/hosts; then
+    sed -i "s|^127\.0\.1\.1.*|127.0.1.1 ${NEW_HOSTNAME}|" /etc/hosts
+else
+    echo "127.0.1.1 ${NEW_HOSTNAME}" >> /etc/hosts
+fi
+echo "  Hostname: ${OLD_HOSTNAME} -> ${NEW_HOSTNAME} (also in /etc/hosts)"
 
 # ─── System update ────────────────────────────────────────────────────────
 echo ""

@@ -195,4 +195,4 @@ services:
     network_mode: host
     volumes:
       - ./cert-server/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./freeradius-proxy/certs:/certs:ro
+      - ./cert-server/public:/certs:ro

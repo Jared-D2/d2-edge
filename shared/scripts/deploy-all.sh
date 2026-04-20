@@ -94,9 +94,34 @@ echo ""
 echo "[6/6] Validating connectivity..."
 sleep 10
 
-ping -c1 -W3 "$GRAYLOG_HOST"       &>/dev/null && echo "  Graylog (${GRAYLOG_HOST}): OK"       || echo "  Graylog (${GRAYLOG_HOST}): FAIL"
-ping -c1 -W3 "$ZABBIX_SERVER_HOST"  &>/dev/null && echo "  Zabbix (${ZABBIX_SERVER_HOST}): OK"  || echo "  Zabbix (${ZABBIX_SERVER_HOST}): FAIL"
-ping -c1 -W3 "$RADIUS_HOME_SERVER"  &>/dev/null && echo "  RADIUS (${RADIUS_HOME_SERVER}): OK"  || echo "  RADIUS (${RADIUS_HOME_SERVER}): FAIL"
+# Actual service ports, not ICMP — ICMP is often blocked even when the
+# real TCP/UDP ports work (misleading FAIL was the #1 confusion in the
+# NIB dummy deploy).
+check_tcp() {
+    local host="$1" port="$2" name="$3"
+    if timeout 3 bash -c "</dev/tcp/$host/$port" 2>/dev/null; then
+        echo "  $name ($host:$port/tcp): OK"
+    else
+        echo "  $name ($host:$port/tcp): FAIL"
+    fi
+}
+check_tcp "$GRAYLOG_HOST"       12203 "Graylog GELF relay"
+check_tcp "$ZABBIX_SERVER_HOST" "$ZABBIX_SERVER_PORT" "Zabbix server"
+# RADIUS is UDP — TCP check would always fail. Use netcat if available,
+# else fall back to a Tailscale peer ping as the only sensible signal.
+if command -v nc >/dev/null 2>&1; then
+    if timeout 3 nc -uzw2 "$RADIUS_HOME_SERVER" 1812 2>/dev/null; then
+        echo "  RADIUS ($RADIUS_HOME_SERVER:1812/udp): probed"
+    else
+        echo "  RADIUS ($RADIUS_HOME_SERVER:1812/udp): probed (UDP is connectionless, may show fail even when working)"
+    fi
+else
+    if docker exec tailscale tailscale ping -c1 "$RADIUS_HOME_SERVER" &>/dev/null; then
+        echo "  RADIUS ($RADIUS_HOME_SERVER): Tailscale-reachable"
+    else
+        echo "  RADIUS ($RADIUS_HOME_SERVER): Tailscale NOT reachable"
+    fi
+fi
 
 echo ""
 echo "[Perms] Tightening secrets written at runtime..."
