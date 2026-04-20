@@ -11,30 +11,8 @@ server default {
         port = 1813
     }
 
-    # --- RadSec (RADIUS over TLS, TCP/2083) -----------------------------------
-    listen {
-        type = auth
-        ipaddr = *
-        port = 2083
-        proto = tcp
-
-        limit {
-            max_connections = 16
-            lifetime = 0
-            idle_timeout = 30
-        }
-
-        tls {
-            private_key_file = /opt/etc/raddb/certs/radsec/radsec.key
-            certificate_file = /opt/etc/raddb/certs/radsec/radsec.crt
-            ca_file = /opt/etc/raddb/certs/radsec/ca-bundle.pem
-            fragment_size = 8192
-            cipher_list = "HIGH"
-            cipher_server_preference = yes
-            tls_min_version = "1.2"
-            tls_max_version = "1.3"
-        }
-    }
+    # --- RadSec (RADIUS over TLS, TCP/2083) - injected by render-configs.sh ---
+${RADSEC_LISTEN_BLOCK}
     authorize {
         preprocess
         update request {

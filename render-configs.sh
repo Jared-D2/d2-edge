@@ -77,6 +77,21 @@ client radsec-local-${i} {
 done
 export LOCAL_CLIENTS_UDP_BLOCKS LOCAL_CLIENTS_RADSEC_BLOCKS
 
+# RadSec listener is optional — only include in rendered `default` site if
+# all three cert files are present. Without them freeradius would fail
+# to start, taking the whole RADIUS stack (incl. plain UDP) down with it.
+RADSEC_CERTS_DIR="${EDGE_DIR}/freeradius-proxy/certs"
+if [[ -f "$RADSEC_CERTS_DIR/radsec.key" \
+   && -f "$RADSEC_CERTS_DIR/radsec.crt" \
+   && -f "$RADSEC_CERTS_DIR/ca-bundle.pem" ]]; then
+    RADSEC_LISTEN_BLOCK=$(cat "${EDGE_DIR}/freeradius-proxy/config/templates/radsec-listen.template")
+    echo "[freeradius] RadSec enabled (certs present)"
+else
+    RADSEC_LISTEN_BLOCK="    # RadSec disabled (cert files not present in ${RADSEC_CERTS_DIR})"
+    echo "[freeradius] RadSec disabled (certs not provisioned) — plain UDP only"
+fi
+export RADSEC_LISTEN_BLOCK
+
 # ─── freeradius-proxy ─────────────────────────────────────────────────────
 FR_TPL="${EDGE_DIR}/freeradius-proxy/config/templates"
 FR_OUT="${EDGE_DIR}/freeradius-proxy/config/rendered"
