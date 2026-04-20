@@ -122,6 +122,11 @@ echo "  Disabled: rpcbind, NFS, CUPS, ModemManager, avahi, lightdm"
 dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1
 echo "  Unattended upgrades: enabled"
 
+# Mark /opt/d2-edge safe for the admin user's git — without this,
+# update.sh (runs `sudo -u admin git pull`) fails with 'dubious ownership'
+# because the repo may have mixed root/admin file ownership.
+sudo -u admin git config --global --add safe.directory /opt/d2-edge 2>/dev/null || true
+
 # ─── Clone repo ───────────────────────────────────────────────────────────
 echo ""
 echo "[7/8] Cloning d2-edge repo..."
@@ -131,6 +136,12 @@ if [[ -d "${EDGE_DIR}/.git" ]]; then
 else
     git clone "${REPO_GIT}" "${EDGE_DIR}"
 fi
+
+# Repo cloned as root; chown everything to admin so update.sh (git pull
+# runs as admin) can write .git state. Keep .env at root:root 600 — secrets.
+chown -R admin:admin "${EDGE_DIR}"
+[[ -f "${EDGE_DIR}/.env" ]] && chown root:root "${EDGE_DIR}/.env" && chmod 600 "${EDGE_DIR}/.env"
+
 
 # ─── Log rotation ─────────────────────────────────────────────────────────
 cat > /etc/logrotate.d/d2-edge-syslog << 'LOGROTATE'
