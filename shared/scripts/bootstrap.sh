@@ -109,7 +109,7 @@ systemctl enable --now fail2ban >/dev/null 2>&1
 echo "  fail2ban: enabled for SSH"
 
 # Disable unnecessary services
-for svc in rpcbind.service rpcbind.socket nfs-blkmap.service            cups.service cups-browsed.service cups.socket cups.path            ModemManager.service avahi-daemon.service avahi-daemon.socket            lightdm.service; do
+for svc in rpcbind.service rpcbind.socket nfs-blkmap.service            cups.service cups-browsed.service cups.socket cups.path            ModemManager.service avahi-daemon.service avahi-daemon.socket            lightdm.service bluetooth.service hciuart.service; do
     systemctl disable --now "$svc" 2>/dev/null || true
 done
 echo "  Disabled: rpcbind, NFS, CUPS, ModemManager, avahi, lightdm"

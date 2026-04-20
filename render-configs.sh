@@ -49,12 +49,8 @@ echo "[zabbix] rendered OK"
 FR_TPL="${EDGE_DIR}/freeradius-proxy/config/templates"
 FR_OUT="${EDGE_DIR}/freeradius-proxy/config/rendered"
 mkdir -p "$FR_OUT"
-for f in clients.conf proxy.conf default policy-operator-name; do
-    case "$f" in
-        default|policy-operator-name) src="$FR_TPL/${f}.template" ;;
-        *)                             src="$FR_TPL/${f}.template" ;;
-    esac
-    envsubst < "$src" > "$FR_OUT/$f"
+for f in clients.conf proxy.conf default; do
+    envsubst < "$FR_TPL/${f}.template" > "$FR_OUT/$f"
     validate_rendered "$FR_OUT/$f" || exit 1
 done
 echo "[freeradius] rendered OK"

@@ -1,3 +1,0 @@
-update request {
-    Operator-Name := "${TENANT_ID}"
-}

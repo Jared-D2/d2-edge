@@ -97,7 +97,6 @@ services:
     volumes:
       - ./freeradius-proxy/config/rendered/clients.conf:/opt/etc/raddb/clients.conf:ro
       - ./freeradius-proxy/config/rendered/proxy.conf:/opt/etc/raddb/proxy.conf:ro
-      - ./freeradius-proxy/config/rendered/policy-operator-name:/opt/etc/raddb/policy-operator-name:ro
       - ./freeradius-proxy/config/rendered/default:/opt/etc/raddb/sites-enabled/default:ro
       - ./freeradius-proxy/certs:/opt/etc/raddb/certs/radsec:ro
     command: ["radiusd", "-f", "-l", "stdout"]
@@ -165,6 +164,10 @@ services:
     depends_on:
       tailscale:
         condition: service_healthy
+    # Docker group access for container metrics (zabbix user not in group
+    # inside the image; need host docker group mapped in).
+    group_add:
+      - "984"
     volumes:
       - /:/rootfs:ro
       - /proc:/host/proc:ro

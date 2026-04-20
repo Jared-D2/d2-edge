@@ -15,7 +15,7 @@ fi
 echo
 echo "[1/4] Pulling latest from Git..."
 cd "$EDGE_DIR"
-git pull
+sudo -u admin git pull
 echo "  OK"
 
 echo

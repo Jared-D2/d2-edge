@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Refresh base distro packages first to pick up Debian security updates
 # (openssl, libssl3t64, libgdk-pixbuf*, libtiff6, etc.)
