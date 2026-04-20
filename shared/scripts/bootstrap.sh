@@ -23,9 +23,13 @@ echo "  Set to: ${NEW_HOSTNAME}"
 
 # ─── System update ────────────────────────────────────────────────────────
 echo ""
-echo "[2/8] Updating system packages..."
+echo "[2/8] Updating system packages + removing desktop bloat..."
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
+# Remove desktop browsers — not needed on a headless edge appliance.
+# Keeps the SD card lean and shrinks the attack surface.
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq     chromium chromium-common chromium-l10n chromium-sandbox     firefox firefox-esr 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq --purge 2>/dev/null || true
 echo "  OK"
 
 # ─── Install dependencies ─────────────────────────────────────────────────

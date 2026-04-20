@@ -167,7 +167,7 @@ services:
     # Docker group access for container metrics (zabbix user not in group
     # inside the image; need host docker group mapped in).
     group_add:
-      - "984"
+      - "${DOCKER_GID:-984}"
     volumes:
       - /:/rootfs:ro
       - /proc:/host/proc:ro

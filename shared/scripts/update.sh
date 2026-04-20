@@ -3,6 +3,13 @@ set -euo pipefail
 
 EDGE_DIR=/opt/d2-edge
 
+# Docker group GID varies per host install — resolve at deploy time.
+export DOCKER_GID=$(getent group docker | cut -d: -f3)
+if [[ -z "$DOCKER_GID" ]]; then
+    echo "ERROR: host 'docker' group not found." >&2
+    exit 1
+fi
+
 echo "========================================"
 echo " D2 Edge Appliance — Update"
 echo "========================================"

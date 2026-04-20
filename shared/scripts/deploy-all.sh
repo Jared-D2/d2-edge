@@ -4,8 +4,16 @@ set -euo pipefail
 ENV_FILE="/opt/d2-edge/.env"
 EDGE_DIR="/opt/d2-edge"
 
+# Docker group GID varies per host install â€” resolve at deploy time
+# so zabbix-agent2's group_add matches this Pi's actual docker group.
+export DOCKER_GID=$(getent group docker | cut -d: -f3)
+if [[ -z "$DOCKER_GID" ]]; then
+    echo "ERROR: host 'docker' group not found. Is Docker installed?" >&2
+    exit 1
+fi
+
 echo "========================================"
-echo " D2 Edge Appliance — Deploy"
+echo " D2 Edge Appliance ï¿½ Deploy"
 echo "========================================"
 
 # --- Load and validate .env -----------------------------------------------
@@ -40,9 +48,9 @@ echo ""
 echo "[2/6] Checking time sync..."
 if chronyc tracking &>/dev/null; then
     OFFSET=$(chronyc tracking | grep "System time" | awk '{print $4}')
-    echo "  OK — offset: ${OFFSET}s"
+    echo "  OK ï¿½ offset: ${OFFSET}s"
 else
-    echo "  WARNING: chrony not running — time may be unreliable"
+    echo "  WARNING: chrony not running ï¿½ time may be unreliable"
 fi
 
 # --- Start Tailscale first ------------------------------------------------
@@ -56,7 +64,7 @@ for i in $(seq 1 24); do
     sleep 5
     TSIP=$(docker exec tailscale tailscale ip -4 2>/dev/null | head -1 || true)
     if [[ -n "$TSIP" ]]; then
-        echo "  OK — Tailscale IP: $TSIP"
+        echo "  OK ï¿½ Tailscale IP: $TSIP"
         break
     fi
     echo "  Waiting... ($((i*5))s)"
@@ -89,6 +97,17 @@ sleep 10
 ping -c1 -W3 "$GRAYLOG_HOST"       &>/dev/null && echo "  Graylog (${GRAYLOG_HOST}): OK"       || echo "  Graylog (${GRAYLOG_HOST}): FAIL"
 ping -c1 -W3 "$ZABBIX_SERVER_HOST"  &>/dev/null && echo "  Zabbix (${ZABBIX_SERVER_HOST}): OK"  || echo "  Zabbix (${ZABBIX_SERVER_HOST}): FAIL"
 ping -c1 -W3 "$RADIUS_HOME_SERVER"  &>/dev/null && echo "  RADIUS (${RADIUS_HOME_SERVER}): OK"  || echo "  RADIUS (${RADIUS_HOME_SERVER}): FAIL"
+
+echo ""
+echo "[Perms] Tightening secrets written at runtime..."
+# Auvik config files are written on first container run; tighten after.
+for f in "$EDGE_DIR/auvik/config/agent.conf" "$EDGE_DIR/auvik/config/extra.conf"; do
+    [[ -f "$f" ]] && chmod 600 "$f"
+done
+# RadSec private key (if provisioned out-of-band into the certs dir)
+[[ -f "$EDGE_DIR/freeradius-proxy/certs/radsec.key" ]] && \
+    chmod 600 "$EDGE_DIR/freeradius-proxy/certs/radsec.key"
+echo "  OK"
 
 echo ""
 echo "========================================"
