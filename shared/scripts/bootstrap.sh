@@ -102,8 +102,6 @@ ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
 ufw allow 22/tcp comment 'SSH' >/dev/null
 ufw allow 514 comment 'Syslog' >/dev/null
-ufw allow 10051/tcp comment 'Zabbix proxy' >/dev/null
-ufw allow 8080/tcp comment 'D2 agent' >/dev/null
 ufw allow 10021/tcp comment 'Auvik' >/dev/null
 ufw allow 1812/udp comment 'RADIUS auth' >/dev/null
 ufw allow 1813/udp comment 'RADIUS acct' >/dev/null
@@ -191,6 +189,20 @@ else
     chmod 600 "${EDGE_DIR}/.env"
     sed -i "s/^EDGE_HOSTNAME=REPLACE_ME$/EDGE_HOSTNAME=${NEW_HOSTNAME}/" "${EDGE_DIR}/.env"
     echo "  Created from template (chmod 600)"
+fi
+
+# Persist this host's docker group GID into .env so `docker compose` reads
+# it natively. Without this, compose would fall back to the pinned default
+# and zabbix-agent2's Docker plugin would silently fail on any Pi whose
+# docker group GID differs.
+DOCKER_GID_ACTUAL=$(getent group docker | cut -d: -f3)
+if [[ -n "$DOCKER_GID_ACTUAL" ]]; then
+    if grep -q "^DOCKER_GID=" "${EDGE_DIR}/.env"; then
+        sed -i "s|^DOCKER_GID=.*|DOCKER_GID=${DOCKER_GID_ACTUAL}|" "${EDGE_DIR}/.env"
+    else
+        echo "DOCKER_GID=${DOCKER_GID_ACTUAL}" >> "${EDGE_DIR}/.env"
+    fi
+    echo "  DOCKER_GID=${DOCKER_GID_ACTUAL} persisted to .env"
 fi
 
 echo ""
