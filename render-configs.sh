@@ -45,6 +45,38 @@ envsubst < "${EDGE_DIR}/zabbix-proxy/config/zabbix_proxy.conf.template"     > "$
 validate_rendered "${EDGE_DIR}/zabbix-proxy/config/zabbix_proxy.conf" || exit 1
 echo "[zabbix] rendered OK"
 
+# Build per-subnet client blocks for FreeRADIUS.
+# LOCAL_CLIENT_SUBNET can be a single CIDR ("10.0.0.0/8") OR a list
+# separated by spaces or commas ("10.0.0.0/8 192.168.1.0/24").
+SUBNETS="${LOCAL_CLIENT_SUBNET//,/ }"
+LOCAL_CLIENTS_UDP_BLOCKS=""
+LOCAL_CLIENTS_RADSEC_BLOCKS=""
+i=0
+for subnet in $SUBNETS; do
+    i=$((i+1))
+    LOCAL_CLIENTS_UDP_BLOCKS="${LOCAL_CLIENTS_UDP_BLOCKS}
+client local-network-${i} {
+    ipaddr = ${subnet}
+    secret = ${LOCAL_CLIENT_SECRET}
+    require_message_authenticator = yes
+}
+"
+    LOCAL_CLIENTS_RADSEC_BLOCKS="${LOCAL_CLIENTS_RADSEC_BLOCKS}
+client radsec-local-${i} {
+    ipaddr = ${subnet}
+    proto = tcp
+    secret = radsec
+    require_message_authenticator = yes
+    limit {
+        max_connections = 16
+        lifetime = 86400
+        idle_timeout = 600
+    }
+}
+"
+done
+export LOCAL_CLIENTS_UDP_BLOCKS LOCAL_CLIENTS_RADSEC_BLOCKS
+
 # ─── freeradius-proxy ─────────────────────────────────────────────────────
 FR_TPL="${EDGE_DIR}/freeradius-proxy/config/templates"
 FR_OUT="${EDGE_DIR}/freeradius-proxy/config/rendered"
