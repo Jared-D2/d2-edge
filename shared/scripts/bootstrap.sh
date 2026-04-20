@@ -89,6 +89,9 @@ ufw allow 1813/udp comment 'RADIUS acct' >/dev/null
 ufw allow 5201/tcp comment 'iperf3 P2P' >/dev/null
 ufw allow 9995/udp comment 'Auvik NetFlow' >/dev/null
 ufw allow 9996/udp comment 'Auvik sFlow' >/dev/null
+ufw allow 2055/udp comment 'Auvik NetFlow (legacy)' >/dev/null
+ufw allow from 192.168.0.0/16 to any port 80 proto tcp comment 'cert-server (LAN onboarding)' >/dev/null
+ufw allow from 192.168.0.0/16 to any port 2083 proto tcp comment 'RadSec from customer devices' >/dev/null
 echo "y" | ufw enable >/dev/null
 echo "  UFW: enabled with service rules"
 
