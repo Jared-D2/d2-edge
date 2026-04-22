@@ -61,7 +61,18 @@ fi
 # d2-agent/zabbix-agent2) is skipped by `docker compose up` — they stay on
 # their old image/config instead of picking up render-configs.sh output.
 export COMPOSE_PROFILES=enabled
-docker compose up -d --force-recreate
+# Force-recreate only services whose config is actually re-rendered by
+# render-configs.sh OR whose image we just rebuilt. Tailscale is excluded
+# on purpose: its compose block has no volume-mounted config, and forcing
+# a recreate reruns `tailscale up --authkey=${TS_AUTHKEY}`. If that
+# authkey has expired or been consumed, the node is logged out of the
+# tailnet — which has locked us out of fleet Pis remotely in the past.
+# Plain `up -d` on tailscale still recreates it if docker-compose.yml
+# itself changed, which is the only case where a restart is warranted.
+docker compose up -d --force-recreate \
+    auvik cert-server d2-agent freeradius-proxy \
+    syslog-proxy zabbix-agent2 zabbix-proxy
+docker compose up -d tailscale
 echo "  OK"
 
 echo
