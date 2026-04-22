@@ -2,24 +2,34 @@
 D2 Edge Agent - Runs on each Raspberry Pi
 """
 import asyncio
+import hmac
+import ipaddress
 import json
 import logging
 import os
 import platform
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
+import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlparse
 
+import defusedxml.ElementTree as ET
 import uvicorn
 import websockets
 from fastapi import FastAPI, Header, HTTPException, Query
 
+_log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, _log_level_name, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
@@ -46,10 +56,32 @@ BUFFER_DB = "/app/buffer/buffer.db"
 BUFFER_MAX_ROWS = int(os.getenv("BUFFER_MAX_ROWS", "20000"))
 BUFFER_RETENTION_DAYS = int(os.getenv("BUFFER_RETENTION_DAYS", "7"))
 
-def init_buffer_db():
+
+@dataclass(frozen=True)
+class MonitorConfig:
+    """Snapshot of controller-pushed monitor targets.
+
+    Frozen + tuple fields so `_monitor_config = new_cfg` is a single
+    atomic pointer swap (GIL-safe in CPython). Monitor loops read the
+    module-level reference once per iteration and never see a torn
+    snapshot across traceroute_targets / http_targets / received.
+    """
+    traceroute_targets: tuple = ()
+    http_targets: tuple = ()
+    received: bool = False
+
+
+_monitor_config = MonitorConfig()
+
+
+def _set_monitor_config(cfg: MonitorConfig) -> None:
+    global _monitor_config
+    _monitor_config = cfg
+
+
+def init_buffer_db() -> None:
     """Initialize local SQLite buffer for outage data retention."""
-    import sqlite3 as _sql
-    conn = _sql.connect(BUFFER_DB)
+    conn = sqlite3.connect(BUFFER_DB)
     conn.execute("""CREATE TABLE IF NOT EXISTS buffered_results (
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
         command   TEXT NOT NULL,
@@ -63,12 +95,11 @@ def init_buffer_db():
     log.info("Buffer DB initialised at %s", BUFFER_DB)
 
 
-def cleanup_buffer_db():
+def cleanup_buffer_db() -> None:
     """Delete flushed rows older than retention window; enforce max row count."""
-    import sqlite3 as _sql
     try:
         cutoff = time.time() - (BUFFER_RETENTION_DAYS * 86400)
-        conn = _sql.connect(BUFFER_DB)
+        conn = sqlite3.connect(BUFFER_DB)
         c1 = conn.execute("DELETE FROM buffered_results WHERE flushed=1 AND timestamp<?", (cutoff,))
         deleted_old = c1.rowcount
         total = conn.execute("SELECT COUNT(*) FROM buffered_results").fetchone()[0]
@@ -87,17 +118,16 @@ def cleanup_buffer_db():
         log.warning("Buffer cleanup error: %s", e)
 
 
-async def buffer_cleanup_loop():
+async def buffer_cleanup_loop() -> None:
     """Run cleanup every hour."""
     while True:
         await asyncio.sleep(3600)
         cleanup_buffer_db()
 
-def buffer_result(command: str, result: dict):
+def buffer_result(command: str, result: dict) -> None:
     """Store a monitoring result locally when controller is unreachable."""
-    import sqlite3 as _sql
     try:
-        conn = _sql.connect(BUFFER_DB)
+        conn = sqlite3.connect(BUFFER_DB)
         conn.execute("INSERT INTO buffered_results (command, result, timestamp) VALUES (?,?,?)",
                      (command, json.dumps(result), result.get("timestamp", time.time())))
         conn.commit()
@@ -105,27 +135,26 @@ def buffer_result(command: str, result: dict):
     except Exception as e:
         log.warning("Buffer write error: %s", e)
 
-def get_buffered_results(limit: int = 500):
+def get_buffered_results(limit: int = 500) -> list:
     """Retrieve unflushed buffered results."""
-    import sqlite3 as _sql
     try:
-        conn = _sql.connect(BUFFER_DB)
-        conn.row_factory = _sql.Row
+        conn = sqlite3.connect(BUFFER_DB)
+        conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM buffered_results WHERE flushed=0 ORDER BY timestamp LIMIT ?", (limit,)
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
-    except Exception:
+    except Exception as e:
+        log.warning("Buffer read error: %s", e)
         return []
 
-def mark_buffered_flushed(ids: list):
+def mark_buffered_flushed(ids: list) -> None:
     """Mark buffered records as flushed."""
-    import sqlite3 as _sql
     if not ids:
         return
     try:
-        conn = _sql.connect(BUFFER_DB)
+        conn = sqlite3.connect(BUFFER_DB)
         conn.execute("UPDATE buffered_results SET flushed=1 WHERE id IN ({})".format(
             ",".join("?" * len(ids))), ids)
         conn.commit()
@@ -155,21 +184,44 @@ def get_default_gateway() -> str:
         pass
     return ""
 
-TARGET_RE = re.compile(r'^[\w.\-]{1,253}$')
+# Hostname / IP targets: must start + end with alnum, no leading hyphen (argv
+# injection defense: blocks "-f", "--iflist", etc. being mistaken for flags by
+# ping/traceroute/nmap/dig). Max label length 63, max total 253.
+TARGET_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?$')
+# nmap port spec: digits, comma, dash. Max 32 comma-separated entries, each
+# up to a 5-digit-dash-5-digit range. Blocks "-" (all ports) and option-form.
+PORT_SPEC_RE = re.compile(r'^\d{1,5}(-\d{1,5})?(,\d{1,5}(-\d{1,5})?){0,31}$')
+DNS_RECORD_TYPES = frozenset({
+    "A", "AAAA", "CNAME", "MX", "NS", "PTR", "SOA", "SRV", "TXT", "CAA",
+})
 
 
 def validate_target(target: str) -> str:
-    if not TARGET_RE.match(target):
+    if not isinstance(target, str) or not TARGET_RE.match(target):
         raise HTTPException(status_code=400, detail="Invalid target")
     return target
 
 
-def require_auth(authorization: Optional[str]):
-    if authorization != f"Bearer {AGENT_TOKEN}":
+def validate_port_spec(port: str) -> str:
+    if not isinstance(port, str) or not PORT_SPEC_RE.match(port):
+        raise HTTPException(status_code=400, detail="Invalid port spec")
+    return port
+
+
+def validate_dns_record_type(record_type: str) -> str:
+    rt = (record_type or "").upper()
+    if rt not in DNS_RECORD_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid DNS record_type")
+    return rt
+
+
+def require_auth(authorization: Optional[str]) -> None:
+    expected = f"Bearer {AGENT_TOKEN}"
+    if not authorization or not hmac.compare_digest(authorization, expected):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-def run_cmd(cmd: list, timeout: int = 60):
+def run_cmd(cmd: list, timeout: int = 60) -> tuple[bool, str]:
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=timeout)
         return True, out.decode(errors="replace")
@@ -182,9 +234,8 @@ def run_cmd(cmd: list, timeout: int = 60):
 
 
 def get_local_ip() -> str:
-    import socket as _socket
     try:
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
@@ -193,15 +244,28 @@ def get_local_ip() -> str:
         return "unknown"
 
 
+# Public IP is expensive to look up (3 sequential HTTP probes, up to 15s).
+# Cached with a 5-minute TTL so /info and register() don't block the handler.
+_public_ip_cache: dict = {"ip": "unknown", "ts": 0.0}
+_PUBLIC_IP_TTL = 300
+
+
 def get_public_ip() -> str:
-    """Fetch public IP via lightweight echo service."""
-    import urllib.request as _req
-    for url in ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"]:
+    """Fetch public IP via lightweight echo service. Cached with 5-min TTL."""
+    now = time.time()
+    if now - _public_ip_cache["ts"] < _PUBLIC_IP_TTL and _public_ip_cache["ip"] != "unknown":
+        return _public_ip_cache["ip"]
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"):
         try:
-            with _req.urlopen(url, timeout=5) as r:
-                return r.read().decode().strip()
+            with urllib.request.urlopen(url, timeout=5) as r:
+                ip = r.read().decode().strip()
+                if ip:
+                    _public_ip_cache["ip"] = ip
+                    _public_ip_cache["ts"] = now
+                    return ip
         except Exception:
             continue
+    _public_ip_cache["ts"] = now  # avoid thundering-herd retries during full outage
     return "unknown"
 
 
@@ -239,12 +303,11 @@ def get_dns_search_domains() -> list:
 def get_tailscale_ip() -> str:
     """Read current Tailscale IPv4 from tailscale0 interface."""
     try:
-        import subprocess
         out = subprocess.check_output(
             ['ip', '-4', '-o', 'addr', 'show', 'tailscale0'],
             timeout=5, stderr=subprocess.DEVNULL,
         ).decode()
-        # Example: '587: tailscale0    inet 100.89.124.63/32 scope global ...'
+        # Example shape: 'N: tailscale0    inet 100.64.0.1/32 scope global ...'
         m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', out)
         return m.group(1) if m else ''
     except Exception:
@@ -312,31 +375,32 @@ def run_iperf_server(duration: int = 15) -> dict:
 
     Schedules a background cleanup: if no client connects within
     (duration + 30)s, kill the iperf3 process to avoid port leak."""
-    import subprocess as sp
     local_ip = get_local_ip()
     # Kill any existing iperf3 server holding port 5201
     try:
-        sp.run(["fuser", "-k", "5201/tcp"], capture_output=True)
-    except Exception:
-        pass
+        subprocess.run(["fuser", "-k", "5201/tcp"], capture_output=True)
+    except Exception as e:
+        log.debug("fuser cleanup before iperf_server failed: %s", e)
     time.sleep(0.3)
     cmd = ["iperf3", "-s", "--one-off", "-J"]
     try:
-        proc = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.PIPE)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         time.sleep(1.0)
-        import threading
-        def _reaper(p, deadline):
+
+        def _reaper(p: subprocess.Popen, deadline: float) -> None:
             try:
                 p.wait(timeout=deadline)
-            except sp.TimeoutExpired:
+            except subprocess.TimeoutExpired:
                 try:
                     p.kill()
                     log.warning("iperf_server PID %d killed - no client connected", p.pid)
-                except Exception:
-                    pass
+                except Exception as kill_e:
+                    log.warning("iperf_server reap kill failed: %s", kill_e)
+
         threading.Thread(target=_reaper, args=(proc, duration + 30), daemon=True).start()
-        return {"status": "listening", "ip": local_ip, "pid": proc.pid}
+        return {"status": "listening", "ip": local_ip}
     except Exception as e:
+        log.warning("iperf_server start failed: %s", e)
         return {"error": "iperf server start failed"}
 
 
@@ -479,22 +543,73 @@ def run_traceroute(target: str, use_mtr: bool = False, count: int = 10) -> dict:
 
 
 URL_ALLOWED_SCHEMES = ("http://", "https://")
-METADATA_HOSTS = ("169.254.169.254", "metadata.google.internal", "fd00:ec2::254")
-# SSRF: always block loopback + link-local. Customer LAN (RFC1918) is
-# intentionally permitted because probing customer infra is this agent's purpose.
-import ipaddress as _ipaddr
-def _is_blocked_host(host: str) -> bool:
-    if not host:
-        return False
-    if host.lower() in METADATA_HOSTS:
+# Cloud instance-metadata endpoints across providers. All resolve over HTTP
+# and can leak IAM tokens / instance data. Match by literal name AND by
+# resolved IP (see _resolve_and_check below — DNS rebinding mitigation).
+METADATA_HOSTS = frozenset({
+    "169.254.169.254",          # AWS / Azure / DigitalOcean / OpenStack
+    "metadata.google.internal", # GCP
+    "fd00:ec2::254",            # AWS IMDSv2 IPv6
+    "192.0.0.192",              # Oracle Cloud
+    "100.100.100.200",          # Alibaba Cloud
+})
+METADATA_IPS = frozenset({
+    "169.254.169.254",
+    "192.0.0.192",
+    "100.100.100.200",
+    "fd00:ec2::254",
+})
+
+
+def _ip_is_blocked(ip_str: str) -> bool:
+    """True if IP is link-local, loopback, multicast, reserved, or metadata."""
+    if ip_str in METADATA_IPS:
         return True
     try:
-        ip = _ipaddr.ip_address(host)
-        if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
-            return True
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return (ip.is_loopback or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or ip.is_unspecified)
+
+
+def _looks_like_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_and_check(host: str) -> tuple[bool, list]:
+    """Resolve host to every IP; return (blocked?, [ips]).
+
+    Customer LAN (RFC1918) is intentionally permitted because probing
+    customer infra is this agent's purpose. We only block:
+      - literal metadata hostnames / IPs
+      - loopback / link-local / multicast / reserved / unspecified
+    """
+    if not host:
+        return True, []
+    if host.lower() in METADATA_HOSTS:
+        return True, []
+    # If host is already an IP literal, skip DNS.
+    try:
+        ipaddress.ip_address(host)
+        return _ip_is_blocked(host), [host]
     except ValueError:
         pass
-    return False
+    # Hostname — resolve every A/AAAA record and check each.
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return True, []  # unresolvable — block defensively
+    ips = sorted({info[4][0] for info in infos})
+    for ip in ips:
+        if _ip_is_blocked(ip):
+            return True, ips
+    return False, ips
+
 
 def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) -> dict:
     """HTTP/HTTPS response time test using curl timing metrics."""
@@ -503,14 +618,20 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
         if "://" in url:
             return {"url": url, "success": False, "error": "Only http(s) URLs allowed"}
         url = "https://" + url
-    # Block cloud metadata IPs (SSRF defense)
-    from urllib.parse import urlparse
+    # Resolve host and block metadata / loopback / link-local IPs. Pin curl to
+    # the resolved IP with --resolve to prevent DNS re-resolution (rebinding)
+    # between our check and curl's own lookup.
     try:
-        host = urlparse(url).hostname or ""
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        scheme_port = 443 if parsed.scheme == "https" else 80
+        port = parsed.port or scheme_port
     except Exception:
-        host = ""
-    if _is_blocked_host(host):
-        return {"url": url, "success": False, "error": "Host blocked (metadata / loopback / link-local)"}
+        return {"url": url, "success": False, "error": "Invalid URL"}
+    blocked, ips = _resolve_and_check(host)
+    if blocked:
+        return {"url": url, "success": False,
+                "error": "Host blocked (metadata / loopback / link-local / unresolvable)"}
     # Use seconds-based variables (compatible with all curl versions), convert to ms
     fmt = (
         "dns_s=%{time_namelookup}\n"
@@ -526,6 +647,9 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
     cmd = ["curl", "-o", "/dev/null", "-s", "-w", fmt,
            "--max-time", str(timeout),
            "--connect-timeout", "5"]
+    # Pin to a resolved IP so curl cannot re-resolve to a blocked address.
+    if ips and host and not _looks_like_ip_literal(host):
+        cmd += ["--resolve", f"{host}:{port}:{ips[0]}"]
     if follow_redirects:
         cmd.append("-L")
     cmd.append(url)
@@ -560,10 +684,9 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
 
 def run_tcp_time(host: str, port: int = 443, timeout: int = 5) -> dict:
     """Measure TCP connection establishment time."""
-    import socket as _socket
     result = {"host": host, "port": port, "timestamp": time.time()}
     try:
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         t0 = time.time()
         err = s.connect_ex((host, port))
@@ -579,23 +702,34 @@ def run_tcp_time(host: str, port: int = 443, timeout: int = 5) -> dict:
     return result
 
 
+# Bounds for nmap parameters exposed to the controller. Clamp here rather
+# than reject so a slightly-off-by-one controller request still executes.
+_NMAP_TIMING_MIN, _NMAP_TIMING_MAX = 0, 5
+_NMAP_TOP_PORTS_MAX = 1000
+_NMAP_TIMEOUT_MAX = 120
+
+
 def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
                    service_detection: bool = False, timing: int = 4,
                    top_ports: int = 0, timeout: int = 10) -> dict:
     """Port check using nmap with optional service detection."""
+    # Clamp numeric params: caller-supplied, must be bounded.
+    timing = max(_NMAP_TIMING_MIN, min(int(timing), _NMAP_TIMING_MAX))
+    top_ports = max(0, min(int(top_ports), _NMAP_TOP_PORTS_MAX))
+    timeout = max(1, min(int(timeout), _NMAP_TIMEOUT_MAX))
+    scan_type = scan_type if scan_type in ("tcp", "udp") else "tcp"
+    # Validate port spec unless top_ports takes precedence.
+    if top_ports == 0:
+        validate_port_spec(str(port))
     # Build nmap command
     cmd = ["nmap", "-oX", "-"]  # XML output to stdout
-    # Scan type
     if scan_type == "udp":
         cmd.append("-sU")
     else:
         cmd.append("-sT")  # TCP connect scan (no root needed)
-    # Timing
     cmd.append(f"-T{timing}")
-    # Service detection
     if service_detection:
         cmd.append("-sV")
-    # Port specification
     if top_ports > 0:
         cmd += ["--top-ports", str(top_ports)]
     elif port:
@@ -604,13 +738,12 @@ def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
     ok, raw = run_cmd(cmd, timeout=timeout + 30)
     result = {"host": host, "port": port, "scan_type": scan_type, "raw_xml": raw[:2000] if ok else None}
     if not ok:
-        # Fallback to socket check
-        import socket as _socket
+        # Fallback to socket check on first requested port.
         try:
             ports = [int(p.strip()) for p in str(port).replace("-", " ").split(",") if p.strip().isdigit()]
             if not ports:
                 ports = [443]
-            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(5)
             start = time.time()
             r = s.connect_ex((host, ports[0]))
@@ -623,9 +756,8 @@ def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
             result["reachable"] = False
             result["error"] = str(e)
         return result
-    # Parse nmap XML
+    # Parse nmap XML (defusedxml, already imported at top).
     try:
-        import xml.etree.ElementTree as ET
         root = ET.fromstring(raw)
         ports_found = []
         for host_el in root.findall("host"):
@@ -660,7 +792,6 @@ def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
 
 def run_dns(target: str = "google.com", server: str = "", record_type: str = "A") -> dict:
     """DNS resolution test using dig if available, fallback to socket."""
-    import socket as _socket
     results = {}
     dig_cmd = ["dig", "+stats", "+noall", "+answer", "+time=3", "+tries=1"]
     if server:
@@ -686,10 +817,10 @@ def run_dns(target: str = "google.com", server: str = "", record_type: str = "A"
     else:
         start = time.time()
         try:
-            addrs = _socket.getaddrinfo(target, None)
+            addrs = socket.getaddrinfo(target, None)
             elapsed = round((time.time() - start) * 1000, 2)
             results["query_ms"] = elapsed
-            results["answers"] = list(set(a[4][0] for a in addrs))
+            results["answers"] = list({a[4][0] for a in addrs})
             results["success"] = True
         except Exception as e:
             results["query_ms"] = None
@@ -810,13 +941,12 @@ async def controller_ws_loop():
                 if buffered:
                     log.info("Flushing %d buffered results to controller", len(buffered))
                     flushed_ids = []
-                    import uuid as _buuid
                     for rec in buffered:
                         try:
                             result = json.loads(rec["result"])
                             await ws.send(json.dumps({
                                 "type": "result",
-                                "job_id": str(_buuid.uuid4()),
+                                "job_id": str(uuid.uuid4()),
                                 "agent_id": AGENT_ID,
                                 "tenant_id": TENANT_ID,
                                 "command": rec["command"],
@@ -896,17 +1026,18 @@ async def handle_command(ws, raw: str):
         }))
         return
 
+    loop = asyncio.get_running_loop()
     result = {}
     try:
         if cmd == "speedtest":
-            result = await asyncio.get_event_loop().run_in_executor(None, run_speedtest)
+            result = await loop.run_in_executor(None, run_speedtest)
         elif cmd == "ping":
             target = validate_target(params.get("target", ""))
             count = int(params.get("count", 10))
             size = int(params.get("size", 0))
             df = bool(params.get("df", False))
             interval = float(params.get("interval", 1.0))
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await loop.run_in_executor(
                 None, run_ping, target, count, size, df, interval)
         elif cmd == "iperf":
             target = validate_target(params.get("target", ""))
@@ -917,28 +1048,28 @@ async def handle_command(ws, raw: str):
             window = params.get("window", "")
             bitrate = params.get("bitrate", "")
             omit = int(params.get("omit", 0))
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await loop.run_in_executor(
                 None, run_iperf, target, duration, reverse, protocol, streams, window, bitrate, omit)
         elif cmd == "iperf_server":
             duration = int(params.get("duration", 15))
-            result = await asyncio.get_event_loop().run_in_executor(None, run_iperf_server, duration)
+            result = await loop.run_in_executor(None, run_iperf_server, duration)
         elif cmd == "traceroute":
             target = validate_target(params.get("target", ""))
             use_mtr = bool(params.get("use_mtr", False))
             count = int(params.get("count", 10))
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await loop.run_in_executor(
                 None, run_traceroute, target, use_mtr, count)
         elif cmd == "http_test":
             url = params.get("url", "")
             follow_redirects = bool(params.get("follow_redirects", True))
             timeout = int(params.get("timeout", 15))
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await loop.run_in_executor(
                 None, run_http_test, url, follow_redirects, timeout)
         elif cmd == "tcp_time":
             host = validate_target(params.get("host", ""))
             port = int(params.get("port", 443))
             timeout = int(params.get("timeout", 5))
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await loop.run_in_executor(
                 None, run_tcp_time, host, port, timeout)
         elif cmd == "port_check":
             host = validate_target(params.get("host", ""))
@@ -947,28 +1078,34 @@ async def handle_command(ws, raw: str):
             service_detection = bool(params.get("service_detection", False))
             timing = int(params.get("timing", 4))
             top_ports = int(params.get("top_ports", 0))
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await loop.run_in_executor(
                 None, run_port_check, host, str(port), scan_type, service_detection, timing, top_ports)
         elif cmd == "dns":
             target = validate_target(params.get("target", "google.com"))
             server = params.get("server", "")
             if server:
                 validate_target(server)
-            record_type = params.get("record_type", "A")
-            result = await asyncio.get_event_loop().run_in_executor(
+            record_type = validate_dns_record_type(params.get("record_type", "A"))
+            result = await loop.run_in_executor(
                 None, run_dns, target, server, record_type)
         elif cmd == "mtu_test":
             target = validate_target(params.get("target", ""))
             max_size = int(params.get("max_size", 1500))
             max_size = max(576, min(max_size, 9000))
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await loop.run_in_executor(
                 None, run_mtu_test, target, max_size)
         elif cmd == "config_update":
-            global _traceroute_targets, _http_targets, _config_received
-            _traceroute_targets = params.get("traceroute_targets", [])
-            _http_targets = params.get("http_targets", [])
-            _config_received = True
-            log.info("Config update: %d traceroute, %d http targets", len(_traceroute_targets), len(_http_targets))
+            # Atomic replace: build a new MonitorConfig and swap the module
+            # reference. Read by the monitor loops as a single pointer deref,
+            # so callers never see a torn snapshot of the three fields.
+            new_cfg = MonitorConfig(
+                traceroute_targets=tuple(params.get("traceroute_targets", [])),
+                http_targets=tuple(params.get("http_targets", [])),
+                received=True,
+            )
+            _set_monitor_config(new_cfg)
+            log.info("Config update: %d traceroute, %d http targets",
+                     len(new_cfg.traceroute_targets), len(new_cfg.http_targets))
             # No result to send back for config updates
             return
         else:
@@ -976,7 +1113,7 @@ async def handle_command(ws, raw: str):
     except HTTPException as e:
         result = {"error": e.detail}
     except Exception as e:
-        log.warning("Command %s failed (%s): %s", cmd, type(e).__name__, e)
+        log.warning("Command %s failed (%s): %s", cmd, type(e).__name__, e, exc_info=True)
         result = {"error": f"{cmd} failed"}
 
     await ws.send(json.dumps({
@@ -1080,36 +1217,32 @@ if _tr_env:
     TRACEROUTE_TARGETS = [t.strip() for t in _tr_env.split(",") if t.strip()]
 TRACEROUTE_INTERVAL = int(os.getenv("TRACEROUTE_INTERVAL", "120"))
 
-# Dynamic monitor targets (updated by controller via config_update)
-_traceroute_targets = []  # list of {"target": "x.x.x.x", "label": "...", "interval": 120}
-_http_targets = []  # list of {"url": "https://...", "label": "...", "interval": 300}
-_config_received = False
-
-
 async def traceroute_monitor_loop(get_ws_func):
     """Periodically run mtr to configured targets and push results."""
-    import uuid as _uuid
     await asyncio.sleep(20)
     while True:
+        # Read once per iteration so a config_update mid-loop can't
+        # split the snapshot between `received` and `traceroute_targets`.
+        cfg = _monitor_config
         try:
-            # Use controller-pushed targets if available, else env defaults
-            if _config_received and _traceroute_targets:
-                targets = _traceroute_targets
+            if cfg.received and cfg.traceroute_targets:
+                targets = cfg.traceroute_targets
             else:
-                targets = [{"target": t.strip(), "interval": TRACEROUTE_INTERVAL}
-                          for t in TRACEROUTE_TARGETS if t.strip()]
+                targets = tuple({"target": t.strip(), "interval": TRACEROUTE_INTERVAL}
+                                for t in TRACEROUTE_TARGETS if t.strip())
 
+            loop = asyncio.get_running_loop()
             for t in targets:
                 target = t.get("target", t) if isinstance(t, dict) else t
                 try:
-                    result = await asyncio.get_event_loop().run_in_executor(
+                    result = await loop.run_in_executor(
                         None, run_traceroute, target, True, 5
                     )
                     result["timestamp"] = time.time()
                     ws = get_ws_func()
                     payload = json.dumps({
                         "type": "result",
-                        "job_id": str(_uuid.uuid4()),
+                        "job_id": str(uuid.uuid4()),
                         "agent_id": AGENT_ID,
                         "tenant_id": TENANT_ID,
                         "command": "traceroute_monitor",
@@ -1125,10 +1258,10 @@ async def traceroute_monitor_loop(get_ws_func):
         except Exception as e:
             log.warning("Traceroute monitor loop error: %s", e)
 
-        # Use minimum interval from targets, default to TRACEROUTE_INTERVAL
         min_interval = TRACEROUTE_INTERVAL
-        if _config_received and _traceroute_targets:
-            intervals = [t.get("interval", TRACEROUTE_INTERVAL) for t in _traceroute_targets]
+        if cfg.received and cfg.traceroute_targets:
+            intervals = [t.get("interval", TRACEROUTE_INTERVAL)
+                         for t in cfg.traceroute_targets if isinstance(t, dict)]
             if intervals:
                 min_interval = min(intervals)
         await asyncio.sleep(min_interval)
@@ -1152,21 +1285,21 @@ HTTP_MONITOR_INTERVAL = int(os.getenv("HTTP_MONITOR_INTERVAL", "300"))
 
 async def http_monitor_loop(get_ws_func):
     """Periodically run HTTP tests to configured targets and push results."""
-    import uuid as _uuid
     await asyncio.sleep(25)
     while True:
+        cfg = _monitor_config
         try:
-            # Use controller-pushed targets if available, else env defaults
-            if _config_received and _http_targets:
-                targets = _http_targets
+            if cfg.received and cfg.http_targets:
+                targets = cfg.http_targets
             else:
                 targets = HTTP_TARGETS
 
+            loop = asyncio.get_running_loop()
             for target in targets:
                 try:
                     url = target.get("url", target) if isinstance(target, dict) else target
                     label = target.get("label", url) if isinstance(target, dict) else url
-                    result = await asyncio.get_event_loop().run_in_executor(
+                    result = await loop.run_in_executor(
                         None, run_http_test, url
                     )
                     result["label"] = label
@@ -1174,7 +1307,7 @@ async def http_monitor_loop(get_ws_func):
                     ws = get_ws_func()
                     payload = json.dumps({
                         "type": "result",
-                        "job_id": str(_uuid.uuid4()),
+                        "job_id": str(uuid.uuid4()),
                         "agent_id": AGENT_ID,
                         "tenant_id": TENANT_ID,
                         "command": "http_monitor",
@@ -1190,10 +1323,10 @@ async def http_monitor_loop(get_ws_func):
         except Exception as e:
             log.warning("HTTP monitor loop error: %s", e)
 
-        # Use minimum interval from targets, default to HTTP_MONITOR_INTERVAL
         min_interval = HTTP_MONITOR_INTERVAL
-        if _config_received and _http_targets:
-            intervals = [t.get("interval", HTTP_MONITOR_INTERVAL) for t in _http_targets if isinstance(t, dict)]
+        if cfg.received and cfg.http_targets:
+            intervals = [t.get("interval", HTTP_MONITOR_INTERVAL)
+                         for t in cfg.http_targets if isinstance(t, dict)]
             if intervals:
                 min_interval = min(intervals)
         await asyncio.sleep(min_interval)

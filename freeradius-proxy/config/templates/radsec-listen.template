@@ -19,5 +19,9 @@
             cipher_server_preference = yes
             tls_min_version = "1.2"
             tls_max_version = "1.3"
+            # Mutual TLS: require the client to present a cert signed by our CA.
+            # Without this, any TCP client reaching 2083 could speak RADIUS/TLS
+            # and only be gated by the shared secret.
+            require_cert = yes
         }
     }

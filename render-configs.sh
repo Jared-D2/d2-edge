@@ -48,6 +48,13 @@ echo "[zabbix] rendered OK"
 # Build per-subnet client blocks for FreeRADIUS.
 # LOCAL_CLIENT_SUBNET can be a single CIDR ("10.0.0.0/8") OR a list
 # separated by spaces or commas ("10.0.0.0/8 192.168.1.0/24").
+# RADSEC_CLIENT_SECRET must be set in .env — RadSec is TLS-wrapped but the
+# shared secret is still authenticated into FreeRADIUS, so a weak/default
+# value would let a local attacker who got past TLS impersonate clients.
+if [[ -z "${RADSEC_CLIENT_SECRET:-}" ]]; then
+    echo "[ERROR] RADSEC_CLIENT_SECRET is not set in .env (required for RadSec client blocks)" >&2
+    exit 1
+fi
 SUBNETS="${LOCAL_CLIENT_SUBNET//,/ }"
 LOCAL_CLIENTS_UDP_BLOCKS=""
 LOCAL_CLIENTS_RADSEC_BLOCKS=""
@@ -65,7 +72,7 @@ client local-network-${i} {
 client radsec-local-${i} {
     ipaddr = ${subnet}
     proto = tcp
-    secret = radsec
+    secret = ${RADSEC_CLIENT_SECRET}
     require_message_authenticator = yes
     limit {
         max_connections = 16

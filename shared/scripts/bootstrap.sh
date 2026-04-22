@@ -162,7 +162,7 @@ chown -R admin:admin "${EDGE_DIR}"
 cat > /etc/logrotate.d/d2-edge-syslog << 'LOGROTATE'
 /opt/d2-edge/syslog-proxy/logs/*/*/*.log {
     daily
-    rotate 2
+    rotate 7
     compress
     delaycompress
     missingok
