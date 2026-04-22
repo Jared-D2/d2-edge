@@ -604,7 +604,12 @@ def _resolve_and_check(host: str) -> tuple[bool, list]:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror:
         return True, []  # unresolvable — block defensively
-    ips = sorted({info[4][0] for info in infos})
+    def _ip_sort_key(ip_str):
+        try:
+            return (ipaddress.ip_address(ip_str).version == 6, ip_str)
+        except ValueError:
+            return (True, ip_str)
+    ips = sorted({info[4][0] for info in infos}, key=_ip_sort_key)
     for ip in ips:
         if _ip_is_blocked(ip):
             return True, ips
