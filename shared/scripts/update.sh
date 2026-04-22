@@ -22,10 +22,15 @@ fi
 echo
 echo "[1/4] Pulling latest from Git..."
 cd "$EDGE_DIR"
-# Heal ownership: earlier deploys (or manual root-level edits) can leave
-# files owned by root, which makes `sudo -u admin git pull` fail on
-# unlink. Idempotent — running on an already-correct tree is a no-op.
-chown -R admin:admin "$EDGE_DIR"
+# Heal ownership on git-tracked paths so `sudo -u admin git pull` can
+# unlink/write them. Runtime data dirs (zabbix-proxy/data|logs,
+# syslog-proxy/logs|state, auvik/*, d2-agent/buffer) are gitignored and
+# owned by container runtime UIDs — DO NOT chown them, or containers lose
+# write access (e.g. zabbix UID 1997 can't write admin-owned data).
+chown admin:admin "$EDGE_DIR"
+chown -R admin:admin "$EDGE_DIR/.git" 2>/dev/null || true
+# Only tracked files matter to `git pull`; list them via the index.
+sudo -u admin git ls-files -z | xargs -0r -I{} chown admin:admin "$EDGE_DIR/{}"
 sudo -u admin git pull
 echo "  OK"
 
