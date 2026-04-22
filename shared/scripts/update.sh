@@ -42,6 +42,11 @@ echo "  OK"
 
 echo
 echo "[4/4] Recreating containers..."
+# Legacy .env files on pre-existing fleet Pis may lack COMPOSE_PROFILES.
+# Without it, every profile-gated service (syslog/zabbix/freeradius/auvik/
+# d2-agent/zabbix-agent2) is skipped by `docker compose up` — they stay on
+# their old image/config instead of picking up render-configs.sh output.
+export COMPOSE_PROFILES=enabled
 docker compose up -d --force-recreate
 echo "  OK"
 
