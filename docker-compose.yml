@@ -197,7 +197,7 @@ services:
 
   # ─── Certificate server ───────────────────────────────────────────────────
   # Serves the internal CA root cert for device onboarding.
-  # Devices pull: http://<PI_LAN_IP>:8888/certs/d2tech-root-ca.crt
+  # Devices pull: http://<PI_LAN_IP>/d2tech-root-ca.crt
   cert-server:
     image: nginx:alpine@sha256:0c5d96dc61c5c3646c1284495a1b32914f0f7f55fa4b7dcf5600b60e8c969a7b
     container_name: cert-server
@@ -207,7 +207,7 @@ services:
       - ./cert-server/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./cert-server/public:/certs:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8888/certs/d2tech-root-ca.crt >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/d2tech-root-ca.crt >/dev/null || exit 1"]
       interval: 60s
       timeout: 5s
       retries: 3

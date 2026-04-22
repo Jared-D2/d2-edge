@@ -683,17 +683,33 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
 
 
 def run_tcp_time(host: str, port: int = 443, timeout: int = 5) -> dict:
-    """Measure TCP connection establishment time."""
+    """Measure TCP connection establishment time.
+
+    Resolves host first and refuses on link-local / metadata / loopback
+    IPs, then pins the connect to the resolved IP so DNS rebinding can't
+    swap the target mid-syscall.
+    """
     result = {"host": host, "port": port, "timestamp": time.time()}
+    blocked, ips = _resolve_and_check(host)
+    if blocked or not ips:
+        result["success"] = False
+        result["connect_ms"] = None
+        result["error"] = "Target resolves to a blocked IP"
+        return result
+    target_ip = ips[0]
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # AF-agnostic so IPv6 resolutions still work. getaddrinfo returned
+        # sorted IPs, so target_ip is deterministic across calls.
+        family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
+        s = socket.socket(family, socket.SOCK_STREAM)
         s.settimeout(timeout)
         t0 = time.time()
-        err = s.connect_ex((host, port))
+        err = s.connect_ex((target_ip, port))
         elapsed = round((time.time() - t0) * 1000, 2)
         s.close()
         result["success"] = err == 0
         result["connect_ms"] = elapsed if err == 0 else None
+        result["resolved_ip"] = target_ip
         result["error"] = None if err == 0 else f"Connection failed (code {err})"
     except Exception as e:
         result["success"] = False
@@ -712,7 +728,12 @@ _NMAP_TIMEOUT_MAX = 120
 def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
                    service_detection: bool = False, timing: int = 4,
                    top_ports: int = 0, timeout: int = 10) -> dict:
-    """Port check using nmap with optional service detection."""
+    """Port check using nmap with optional service detection.
+
+    Resolves host first and refuses on link-local / metadata / loopback
+    IPs. Pins nmap and the socket fallback to the resolved IP so DNS
+    rebinding can't swap the target between the check and the scan.
+    """
     # Clamp numeric params: caller-supplied, must be bounded.
     timing = max(_NMAP_TIMING_MIN, min(int(timing), _NMAP_TIMING_MAX))
     top_ports = max(0, min(int(top_ports), _NMAP_TOP_PORTS_MAX))
@@ -721,7 +742,12 @@ def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
     # Validate port spec unless top_ports takes precedence.
     if top_ports == 0:
         validate_port_spec(str(port))
-    # Build nmap command
+    blocked, ips = _resolve_and_check(host)
+    if blocked or not ips:
+        return {"host": host, "port": port, "scan_type": scan_type,
+                "reachable": False, "error": "Target resolves to a blocked IP"}
+    target_ip = ips[0]
+    # Build nmap command; scan the resolved IP, not the hostname.
     cmd = ["nmap", "-oX", "-"]  # XML output to stdout
     if scan_type == "udp":
         cmd.append("-sU")
@@ -734,19 +760,22 @@ def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
         cmd += ["--top-ports", str(top_ports)]
     elif port:
         cmd += ["-p", str(port)]
-    cmd.append(host)
+    cmd.append(target_ip)
     ok, raw = run_cmd(cmd, timeout=timeout + 30)
-    result = {"host": host, "port": port, "scan_type": scan_type, "raw_xml": raw[:2000] if ok else None}
+    result = {"host": host, "resolved_ip": target_ip, "port": port,
+              "scan_type": scan_type, "raw_xml": raw[:2000] if ok else None}
     if not ok:
-        # Fallback to socket check on first requested port.
+        # Fallback to socket check on first requested port, also pinned
+        # to the already-resolved IP.
         try:
             ports = [int(p.strip()) for p in str(port).replace("-", " ").split(",") if p.strip().isdigit()]
             if not ports:
                 ports = [443]
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
+            s = socket.socket(family, socket.SOCK_STREAM)
             s.settimeout(5)
             start = time.time()
-            r = s.connect_ex((host, ports[0]))
+            r = s.connect_ex((target_ip, ports[0]))
             elapsed = round((time.time() - start) * 1000, 2)
             s.close()
             result["reachable"] = r == 0
@@ -1137,13 +1166,13 @@ DNS_INTERVAL = 30
 
 async def gateway_monitor_loop(get_ws_func):
     """Ping default gateway every 30s and push results."""
-    import uuid as _uuid
     await asyncio.sleep(15)  # offset from DNS loop
     while True:
         try:
             gw = get_default_gateway()
             if gw:
-                result = await asyncio.get_event_loop().run_in_executor(
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
                     None, run_ping, gw, 3, 0, False, 1.0
                 )
                 result["gateway"] = gw
@@ -1151,7 +1180,7 @@ async def gateway_monitor_loop(get_ws_func):
                 ws = get_ws_func()
                 payload = json.dumps({
                     "type": "result",
-                    "job_id": str(_uuid.uuid4()),
+                    "job_id": str(uuid.uuid4()),
                     "agent_id": AGENT_ID,
                     "tenant_id": TENANT_ID,
                     "command": "gateway_monitor",
@@ -1172,21 +1201,21 @@ async def gateway_monitor_loop(get_ws_func):
 
 async def dns_monitor_loop(get_ws_func):
     """Continuously run DNS checks and push results to controller."""
-    import uuid as _uuid
     await asyncio.sleep(10)
     while True:
+        loop = asyncio.get_running_loop()
         try:
             ws = get_ws_func()
             if ws is not None:
                 for t in DNS_TARGETS:
                     try:
-                        result = await asyncio.get_event_loop().run_in_executor(
+                        result = await loop.run_in_executor(
                             None, run_dns, t["target"], t["server"], t["record_type"]
                         )
                         result["label"] = t.get("label", "external")
                         await ws.send(json.dumps({
                             "type": "result",
-                            "job_id": str(_uuid.uuid4()),
+                            "job_id": str(uuid.uuid4()),
                             "agent_id": AGENT_ID,
                             "tenant_id": TENANT_ID,
                             "command": "dns_monitor",
@@ -1201,7 +1230,7 @@ async def dns_monitor_loop(get_ws_func):
         if get_ws_func() is None:
             try:
                 for t in DNS_TARGETS:
-                    result = await asyncio.get_event_loop().run_in_executor(
+                    result = await loop.run_in_executor(
                         None, run_dns, t["target"], t["server"], t["record_type"]
                     )
                     buffer_result("dns_monitor", result)

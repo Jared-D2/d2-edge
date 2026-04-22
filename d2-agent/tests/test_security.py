@@ -254,3 +254,100 @@ class TestParseTraceroute:
         hops = app.parse_traceroute(raw)
         assert len(hops) == 1
         assert hops[0]["hop"] == 1
+
+
+# ─── run_tcp_time / run_port_check SSRF ──────────────────────────────────────
+# These were reachable via the `tcp_time` and `port_check` controller
+# commands and previously bypassed the DNS resolve check that run_http_test
+# uses. Cover both the resolve-refuses and the resolve-pins-IP paths.
+class TestTcpTimeSsrf:
+    def test_refuses_metadata_hostname_without_connecting(self, monkeypatch):
+        sentinel = {"called": False}
+
+        def spy_socket(*_a, **_kw):
+            sentinel["called"] = True
+            raise AssertionError("socket should never be constructed "
+                                 "for a blocked target")
+        monkeypatch.setattr(app.socket, "socket", spy_socket)
+        r = app.run_tcp_time("metadata.google.internal", 80, timeout=1)
+        assert r["success"] is False
+        assert sentinel["called"] is False
+        assert "blocked" in r["error"].lower()
+
+    def test_refuses_rebinding_when_any_ip_is_metadata(self, monkeypatch):
+        def fake_getaddrinfo(host, _port, **_kw):
+            return [(0, 0, 0, "", ("169.254.169.254", 0)),
+                    (0, 0, 0, "", ("8.8.8.8", 0))]
+        monkeypatch.setattr(app.socket, "getaddrinfo", fake_getaddrinfo)
+
+        def spy_socket(*_a, **_kw):
+            raise AssertionError("should have refused before socket()")
+        monkeypatch.setattr(app.socket, "socket", spy_socket)
+        r = app.run_tcp_time("attacker.example.com", 80, timeout=1)
+        assert r["success"] is False
+
+    def test_pins_to_resolved_ip_on_success(self, monkeypatch):
+        # Resolution yields a single public IP; ensure connect_ex is
+        # called with that IP, not with the original hostname.
+        def fake_getaddrinfo(_host, _port, **_kw):
+            return [(0, 0, 0, "", ("203.0.113.5", 0))]
+        monkeypatch.setattr(app.socket, "getaddrinfo", fake_getaddrinfo)
+
+        seen = {}
+
+        class FakeSock:
+            def settimeout(self, _): pass
+            def connect_ex(self, addr):
+                seen["addr"] = addr
+                return 0
+            def close(self): pass
+
+        monkeypatch.setattr(app.socket, "socket", lambda *_a, **_kw: FakeSock())
+        r = app.run_tcp_time("host.example.com", 443, timeout=1)
+        assert r["success"] is True
+        assert seen["addr"] == ("203.0.113.5", 443)
+        assert r.get("resolved_ip") == "203.0.113.5"
+
+
+class TestPortCheckSsrf:
+    def test_refuses_loopback_literal(self, monkeypatch):
+        def spy_run_cmd(*_a, **_kw):
+            raise AssertionError("nmap should never be invoked for blocked")
+        monkeypatch.setattr(app, "run_cmd", spy_run_cmd)
+        r = app.run_port_check("127.0.0.1", "22")
+        assert r["reachable"] is False
+        assert "blocked" in r["error"].lower()
+
+    def test_refuses_rebinding_when_any_ip_is_metadata(self, monkeypatch):
+        def fake_getaddrinfo(_host, _port, **_kw):
+            return [(0, 0, 0, "", ("8.8.8.8", 0)),
+                    (0, 0, 0, "", ("169.254.169.254", 0))]
+        monkeypatch.setattr(app.socket, "getaddrinfo", fake_getaddrinfo)
+
+        def spy_run_cmd(*_a, **_kw):
+            raise AssertionError("nmap should never be invoked for blocked")
+        monkeypatch.setattr(app, "run_cmd", spy_run_cmd)
+        r = app.run_port_check("attacker.example.com", "22")
+        assert r["reachable"] is False
+
+    def test_pins_nmap_to_resolved_ip(self, monkeypatch):
+        def fake_getaddrinfo(_host, _port, **_kw):
+            return [(0, 0, 0, "", ("203.0.113.5", 0))]
+        monkeypatch.setattr(app.socket, "getaddrinfo", fake_getaddrinfo)
+
+        seen_cmd = {}
+
+        def fake_run_cmd(cmd, timeout=60):
+            seen_cmd["cmd"] = cmd
+            # Minimal valid nmap XML with one port.
+            xml = ('<?xml version="1.0"?>'
+                   '<nmaprun><host><ports><port portid="22" protocol="tcp">'
+                   '<state state="open"/><service name="ssh"/>'
+                   '</port></ports></host></nmaprun>')
+            return True, xml
+        monkeypatch.setattr(app, "run_cmd", fake_run_cmd)
+        r = app.run_port_check("host.example.com", "22")
+        # Hostname argument to nmap must be the resolved IP, not the hostname.
+        assert "203.0.113.5" in seen_cmd["cmd"]
+        assert "host.example.com" not in seen_cmd["cmd"]
+        assert r.get("resolved_ip") == "203.0.113.5"

@@ -48,12 +48,20 @@ echo "[zabbix] rendered OK"
 # Build per-subnet client blocks for FreeRADIUS.
 # LOCAL_CLIENT_SUBNET can be a single CIDR ("10.0.0.0/8") OR a list
 # separated by spaces or commas ("10.0.0.0/8 192.168.1.0/24").
-# RADSEC_CLIENT_SECRET must be set in .env — RadSec is TLS-wrapped but the
-# shared secret is still authenticated into FreeRADIUS, so a weak/default
-# value would let a local attacker who got past TLS impersonate clients.
+# RADSEC_CLIENT_SECRET: self-heal on first run. Every Pi previously
+# inherited the hardcoded "radsec" literal; auto-generating and
+# persisting into .env avoids forcing a manual fleet-wide edit while
+# still giving each Pi a unique secret (same pattern bootstrap uses
+# for DOCKER_GID). Safe because RadSec is cert-gated and not yet
+# deployed anywhere, so rotating the secret doesn't break any
+# currently-connected client.
 if [[ -z "${RADSEC_CLIENT_SECRET:-}" ]]; then
-    echo "[ERROR] RADSEC_CLIENT_SECRET is not set in .env (required for RadSec client blocks)" >&2
-    exit 1
+    RADSEC_CLIENT_SECRET="$(openssl rand -hex 32)"
+    export RADSEC_CLIENT_SECRET
+    if ! grep -q '^RADSEC_CLIENT_SECRET=' "${EDGE_DIR}/.env"; then
+        echo "RADSEC_CLIENT_SECRET=${RADSEC_CLIENT_SECRET}" >> "${EDGE_DIR}/.env"
+        echo "[render-configs] Generated RADSEC_CLIENT_SECRET and appended to .env"
+    fi
 fi
 SUBNETS="${LOCAL_CLIENT_SUBNET//,/ }"
 LOCAL_CLIENTS_UDP_BLOCKS=""
