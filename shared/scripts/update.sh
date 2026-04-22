@@ -47,6 +47,15 @@ echo "  OK"
 
 echo
 echo "[4/4] Recreating containers..."
+# Zabbix runtime data must be owned by the zabbix container user (UID 1997
+# / GID 1995 in the zabbix/zabbix-proxy-sqlite3:alpine image). Historic
+# broad `chown -R admin` runs left zabbix_proxy.db owned by admin 0644,
+# which silently breaks SQLite writes on the next container recreate
+# ("attempt to write a readonly database" → proxy down, agent2 active
+# checks time out). Idempotent no-op on correctly-owned trees.
+if [[ -d "$EDGE_DIR/zabbix-proxy/data" ]]; then
+    chown -R 1997:1995 "$EDGE_DIR/zabbix-proxy/data" "$EDGE_DIR/zabbix-proxy/logs" 2>/dev/null || true
+fi
 # Legacy .env files on pre-existing fleet Pis may lack COMPOSE_PROFILES.
 # Without it, every profile-gated service (syslog/zabbix/freeradius/auvik/
 # d2-agent/zabbix-agent2) is skipped by `docker compose up` — they stay on
