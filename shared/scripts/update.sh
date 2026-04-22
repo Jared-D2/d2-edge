@@ -22,6 +22,10 @@ fi
 echo
 echo "[1/4] Pulling latest from Git..."
 cd "$EDGE_DIR"
+# Heal ownership: earlier deploys (or manual root-level edits) can leave
+# files owned by root, which makes `sudo -u admin git pull` fail on
+# unlink. Idempotent — running on an already-correct tree is a no-op.
+chown -R admin:admin "$EDGE_DIR"
 sudo -u admin git pull
 echo "  OK"
 
