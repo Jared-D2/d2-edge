@@ -154,6 +154,7 @@ services:
       - NETBOX_SITE_SLUG=${NETBOX_SITE_SLUG}
       - TENANT_ID=${TENANT_ID}
       - HEARTBEAT_INTERVAL=30
+      - GIT_SHA=${GIT_SHA:-unknown}
     volumes:
       - ./d2-agent/d2-internal-root.crt:/usr/local/share/ca-certificates/d2-internal-root.crt:ro
       - ./d2-agent/buffer:/app/buffer

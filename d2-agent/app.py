@@ -46,6 +46,7 @@ HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
 _allowed_env = os.getenv("ALLOWED_COMMANDS", "").strip()
 ALLOWED_COMMANDS = set(c.strip() for c in _allowed_env.split(",") if c.strip()) if _allowed_env else None
 NETBOX_SITE_SLUG = os.getenv("NETBOX_SITE_SLUG", "")
+GIT_SHA = os.getenv("GIT_SHA", "unknown").strip() or "unknown"
 
 if not AGENT_TOKEN or AGENT_TOKEN == "change-me":
     log.critical("AGENT_TOKEN is not set. Refusing to start.")
@@ -330,6 +331,8 @@ def system_info() -> dict:
         "tenant_name": TENANT_NAME,
         "dns_servers": get_dns_servers(),
         "python": platform.python_version(),
+        "git_sha": GIT_SHA,
+        "version": GIT_SHA[:7] if GIT_SHA != "unknown" else "unknown",
         "uptime_seconds": uptime_seconds,
         "timestamp": time.time(),
     }

@@ -19,6 +19,15 @@ echo "========================================"
 # --- Load and validate .env -----------------------------------------------
 echo ""
 echo "[1/6] Validating .env..."
+# Stamp current git SHA into .env so d2-agent reports the running code version
+if [[ -d "$EDGE_DIR/.git" ]]; then
+    SHA=$(git -C "$EDGE_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
+    if grep -q '^GIT_SHA=' "$ENV_FILE" 2>/dev/null; then
+        sed -i "s|^GIT_SHA=.*|GIT_SHA=${SHA}|" "$ENV_FILE"
+    else
+        echo "GIT_SHA=${SHA}" >> "$ENV_FILE"
+    fi
+fi
 source "$ENV_FILE"
 
 REQUIRED=(

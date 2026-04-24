@@ -205,6 +205,14 @@ if [[ -n "$DOCKER_GID_ACTUAL" ]]; then
     echo "  DOCKER_GID=${DOCKER_GID_ACTUAL} persisted to .env"
 fi
 
+# Seed current git SHA so d2-agent can report the running code version.
+SHA=$(git -C "${EDGE_DIR}" rev-parse HEAD 2>/dev/null || echo "unknown")
+if grep -q '^GIT_SHA=' "${EDGE_DIR}/.env" 2>/dev/null; then
+    sed -i "s|^GIT_SHA=.*|GIT_SHA=${SHA}|" "${EDGE_DIR}/.env"
+else
+    echo "GIT_SHA=${SHA}" >> "${EDGE_DIR}/.env"
+fi
+
 echo ""
 echo "========================================"
 echo " Bootstrap complete!"

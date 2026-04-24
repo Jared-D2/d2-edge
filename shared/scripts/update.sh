@@ -32,7 +32,14 @@ chown -R admin:admin "$EDGE_DIR/.git" 2>/dev/null || true
 # Only tracked files matter to `git pull`; list them via the index.
 sudo -u admin git ls-files -z | xargs -0r -I{} chown admin:admin "$EDGE_DIR/{}"
 sudo -u admin git pull
-echo "  OK"
+# Stamp current commit into .env so d2-agent reports the running version.
+SHA=$(sudo -u admin git -C "$EDGE_DIR" rev-parse HEAD)
+if grep -q '^GIT_SHA=' "$EDGE_DIR/.env" 2>/dev/null; then
+    sed -i "s|^GIT_SHA=.*|GIT_SHA=${SHA}|" "$EDGE_DIR/.env"
+else
+    echo "GIT_SHA=${SHA}" >> "$EDGE_DIR/.env"
+fi
+echo "  OK ($SHA)"
 
 echo
 echo "[2/4] Re-rendering configs..."
