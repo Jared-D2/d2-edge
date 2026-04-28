@@ -20,7 +20,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 echo
-echo "[1/4] Pulling latest from Git..."
+echo "[1/5] Pulling latest from Git..."
 cd "$EDGE_DIR"
 # Heal ownership on git-tracked paths so `sudo -u admin git pull` can
 # unlink/write them. Runtime data dirs (zabbix-proxy/data|logs,
@@ -42,18 +42,23 @@ fi
 echo "  OK ($SHA)"
 
 echo
-echo "[2/4] Re-rendering configs..."
+echo "[2/5] Validating .env and host state..."
+bash "$EDGE_DIR/shared/scripts/preflight.sh"
+echo "  OK"
+
+echo
+echo "[3/5] Re-rendering configs..."
 bash "$EDGE_DIR/render-configs.sh"
 echo "  OK"
 
 echo
-echo "[3/4] Building d2-agent image..."
+echo "[4/5] Building d2-agent image..."
 cd "$EDGE_DIR"
 docker compose build d2-agent --pull
 echo "  OK"
 
 echo
-echo "[4/4] Recreating containers..."
+echo "[5/5] Recreating containers..."
 # Zabbix runtime data must be owned by the zabbix container user (UID 1997
 # / GID 1995 in the zabbix/zabbix-proxy-sqlite3:alpine image). Historic
 # broad `chown -R admin` runs left zabbix_proxy.db owned by admin 0644,

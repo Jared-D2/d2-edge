@@ -30,26 +30,7 @@ if [[ -d "$EDGE_DIR/.git" ]]; then
 fi
 source "$ENV_FILE"
 
-REQUIRED=(
-    EDGE_HOSTNAME EDGE_SITE_ID TZ
-    TENANT_ID TENANT_NAME ENVIRONMENT
-    TS_AUTHKEY
-    GRAYLOG_HOST
-    ZABBIX_SERVER_HOST ZABBIX_SERVER_PORT
-    RADIUS_HOME_SERVER
-    RADIUS_SHARED_SECRET LOCAL_CLIENT_SECRET LOCAL_CLIENT_SUBNET
-    AUVIK_USERNAME AUVIK_API_KEY AUVIK_DOMAIN_PREFIX AGENT_TOKEN CONTROLLER_URL
-)
-
-MISSING=0
-for VAR in "${REQUIRED[@]}"; do
-    VAL="${!VAR:-}"
-    if [[ -z "$VAL" || "$VAL" == "REPLACE_ME" ]]; then
-        echo "  ERROR: $VAR is not set"
-        MISSING=1
-    fi
-done
-[[ $MISSING -eq 1 ]] && { echo "Fix .env and re-run."; exit 1; }
+bash "$EDGE_DIR/shared/scripts/preflight.sh"
 echo "  OK"
 
 # --- NTP sync check -------------------------------------------------------
