@@ -19,6 +19,17 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Heal .env if DOCKER_GID is missing — older bootstraps didn't persist it,
+# and `docker compose` interpolates ${DOCKER_GID} from .env at graph-parse
+# time. A missing key leaves zabbix-agent2's group_add unresolved and
+# stops the start phase mid-recreate (containers stuck in 'Created').
+# This must run BEFORE preflight at [2/5] so the new required-key check
+# doesn't reject a legacy .env that we're about to fix.
+if [[ -f "$EDGE_DIR/.env" ]] && ! grep -q "^DOCKER_GID=" "$EDGE_DIR/.env"; then
+    echo "DOCKER_GID=${DOCKER_GID}" >> "$EDGE_DIR/.env"
+    echo "Healed .env: appended DOCKER_GID=${DOCKER_GID} (legacy bootstrap)"
+fi
+
 echo
 echo "[1/5] Pulling latest from Git..."
 cd "$EDGE_DIR"

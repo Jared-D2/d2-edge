@@ -36,8 +36,11 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 # --- 3. Required keys present + non-empty -------------------------------
-# These are operator-supplied and must be set before any deploy. Auto-managed
-# keys (DOCKER_GID, GIT_SHA, COMPOSE_PROFILES) are handled by update.sh and
+# Operator-supplied keys + DOCKER_GID. DOCKER_GID is required because
+# docker compose interpolates it from .env at graph-parse time, so a
+# missing key leaves zabbix-agent2's group_add unresolved and silently
+# stops the start phase mid-recreate (containers stuck in 'Created').
+# Auto-managed (GIT_SHA, COMPOSE_PROFILES) are handled by update.sh and
 # are deliberately NOT required here.
 required=(
     TZ EDGE_HOSTNAME EDGE_SITE_ID NETBOX_SITE_SLUG
@@ -48,6 +51,7 @@ required=(
     AUVIK_USERNAME AUVIK_API_KEY AUVIK_DOMAIN_PREFIX
     AGENT_TOKEN CONTROLLER_URL
     RADSEC_CLIENT_SECRET
+    DOCKER_GID
 )
 
 if [[ -f "$ENV_FILE" ]]; then
@@ -81,8 +85,9 @@ if [[ -n "${TS_AUTHKEY:-}" && "${TS_AUTHKEY}" != "REPLACE_ME" \
     fail "TS_AUTHKEY must start with 'tskey-client-' (OAuth secret); pre-auth keys expire and re-break Pis"
 fi
 
-# --- 5. DOCKER_GID, if set in .env, must match host's docker group ------
-# update.sh exports DOCKER_GID at deploy time so this is just a drift check.
+# --- 5. DOCKER_GID format and host match --------------------------------
+# DOCKER_GID is required (check 3 catches absence). Here we validate it's
+# numeric and matches the host's actual docker group GID.
 if [[ -n "${DOCKER_GID:-}" ]]; then
     if [[ ! "$DOCKER_GID" =~ ^[0-9]+$ ]]; then
         fail "DOCKER_GID='$DOCKER_GID' in .env is non-numeric"
@@ -97,9 +102,8 @@ if [[ -n "${DOCKER_GID:-}" ]]; then
 fi
 
 # --- 6. docker-compose.yml parses with this .env ------------------------
-# Ensure the env vars docker compose needs are exported so its interpolation
-# doesn't yield empty values during validation.
-[[ -z "${DOCKER_GID:-}" ]] && export DOCKER_GID="$(getent group docker | cut -d: -f3 2>/dev/null || echo 0)"
+# DOCKER_GID is sourced via the `set -a` block above (required key, check 3).
+# COMPOSE_PROFILES has a sane default for legacy .envs that predate it.
 [[ -z "${COMPOSE_PROFILES:-}" ]] && export COMPOSE_PROFILES=enabled
 
 if ! (cd "$COMPOSE_DIR" && docker compose config >/dev/null 2>"$COMPOSE_DIR/.preflight-compose.err"); then
