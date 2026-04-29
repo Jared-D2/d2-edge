@@ -36,7 +36,13 @@ if grep -q "^127\.0\.1\.1" /etc/hosts; then
 else
     echo "127.0.1.1 ${NEW_HOSTNAME}" >> /etc/hosts
 fi
-echo "  Hostname: ${OLD_HOSTNAME} -> ${NEW_HOSTNAME} (also in /etc/hosts)"
+# Disable cloud-init hostname management. Without this, cloud-init re-applies
+# its instance-data hostname on every boot and reverts the rename above.
+mkdir -p /etc/cloud/cloud.cfg.d
+cat > /etc/cloud/cloud.cfg.d/99-disable-hostname.cfg << 'CLOUDCFG'
+preserve_hostname: true
+CLOUDCFG
+echo "  Hostname: ${OLD_HOSTNAME} -> ${NEW_HOSTNAME} (also in /etc/hosts, cloud-init pinned)"
 
 # ─── System update ────────────────────────────────────────────────────────
 echo ""
