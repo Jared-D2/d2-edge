@@ -1302,6 +1302,97 @@ async def controller_ws_loop():
             backoff = min(backoff * 2, 120)
 
 
+
+def run_zoom_test() -> dict:
+    """Test Zoom connectivity via HTTPS, TCP 443, TCP 8443, and UDP 3478 STUN.
+
+    Returns a dict with per-probe results.  The overall success flag is True
+    when HTTPS passes AND at least one of UDP STUN or TCP 443 passes —
+    matching what the Zoom client actually needs.
+    """
+    import struct
+    import secrets
+
+    result = {
+        "command": "zoom_test",
+        "success": False,
+        "https_ok": False,
+        "https_ms": None,
+        "tcp_443_ok": False,
+        "tcp_443_ms": None,
+        "tcp_8443_ok": False,
+        "tcp_8443_ms": None,
+        "udp_3478_ok": False,
+        "udp_3478_ms": None,
+        "error": None,
+    }
+
+    # ── HTTPS ──────────────────────────────────────────────────────────────
+    try:
+        http_res = run_http_test("https://zoom.us")
+        result["https_ok"] = bool(http_res.get("success"))
+        result["https_ms"] = http_res.get("total_ms")
+    except Exception as e:
+        result["error"] = f"https probe error: {e}"
+
+    # ── TCP 443 ────────────────────────────────────────────────────────────
+    try:
+        tcp_443 = run_tcp_time("zoom.us", 443, 5)
+        result["tcp_443_ok"] = bool(tcp_443.get("success"))
+        result["tcp_443_ms"] = tcp_443.get("connect_ms")
+    except Exception as e:
+        result["error"] = (result["error"] or "") + f" tcp443: {e}"
+
+    # ── TCP 8443 ───────────────────────────────────────────────────────────
+    try:
+        tcp_8443 = run_tcp_time("zoom.us", 8443, 5)
+        result["tcp_8443_ok"] = bool(tcp_8443.get("success"))
+        result["tcp_8443_ms"] = tcp_8443.get("connect_ms")
+    except Exception as e:
+        result["error"] = (result["error"] or "") + f" tcp8443: {e}"
+
+    # ── UDP 3478 STUN ──────────────────────────────────────────────────────
+    try:
+        # Resolve zoom.us to a single IP (reuse existing safe resolver)
+        import socket as _sock
+        try:
+            addrs = _sock.getaddrinfo("zoom.us", 3478, _sock.AF_UNSPEC, _sock.SOCK_DGRAM)
+            zoom_ip = addrs[0][4][0]
+        except Exception as resolve_err:
+            raise OSError(f"DNS resolution failed: {resolve_err}")
+
+        # Build a minimal STUN Binding Request:
+        #   type=0x0001, length=0, magic=0x2112A442, tx-id=12 random bytes
+        tx_id = secrets.token_bytes(12)
+        stun_req = struct.pack("!HHI", 0x0001, 0, 0x2112A442) + tx_id
+
+        family = _sock.AF_INET6 if ":" in zoom_ip else _sock.AF_INET
+        udp = _sock.socket(family, _sock.SOCK_DGRAM)
+        udp.settimeout(3)
+        try:
+            t0 = time.time()
+            udp.sendto(stun_req, (zoom_ip, 3478))
+            data, _ = udp.recvfrom(2048)
+            elapsed_ms = round((time.time() - t0) * 1000, 2)
+            # STUN Success Response type is 0x0101
+            if len(data) >= 4:
+                msg_type = struct.unpack("!H", data[:2])[0]
+                if msg_type == 0x0101:
+                    result["udp_3478_ok"] = True
+                    result["udp_3478_ms"] = elapsed_ms
+        except _sock.timeout:
+            pass  # udp_3478_ok stays False
+        finally:
+            udp.close()
+    except Exception as e:
+        result["error"] = (result["error"] or "") + f" udp3478: {e}"
+
+    # ── Overall success ────────────────────────────────────────────────────
+    result["success"] = result["https_ok"] and (
+        result["udp_3478_ok"] or result["tcp_443_ok"]
+    )
+    return result
+
 async def handle_command(ws, raw: str):
     try:
         msg = json.loads(raw)
@@ -1396,6 +1487,8 @@ async def handle_command(ws, raw: str):
             max_size = max(576, min(max_size, 9000))
             result = await loop.run_in_executor(
                 None, run_mtu_test, target, max_size)
+        elif cmd == "zoom_test":
+            result = await loop.run_in_executor(None, run_zoom_test)
         elif cmd == "dhcp_test":
             iface = params.get("interface", "eth0")
             result = await loop.run_in_executor(None, run_dhcp_test, iface)
