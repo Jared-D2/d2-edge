@@ -540,6 +540,203 @@ def run_mtu_test(target: str, max_size: int = 1500) -> dict:
     return {"target": target, "mtu_size": best, "success": True,
             "raw": f"pmtu={best}", "attempts": attempts}
 
+def run_dhcp_test(interface: str = "eth0") -> dict:
+    """DHCP DORA timing test using AF_PACKET raw Ethernet.
+
+    Sends a DHCP Discover with a locally-administered fake MAC, waits for
+    Offer, sends Request, waits for ACK, then sends Release.  Uses raw
+    AF_PACKET sockets — no macvlan or dhclient needed. Requires CAP_NET_RAW.
+    """
+    import struct
+    import secrets
+
+    result = {
+        "command": "dhcp_test",
+        "interface": interface,
+        "success": False,
+        "discover_ms": None,
+        "ack_ms": None,
+        "total_ms": None,
+        "offered_ip": None,
+        "lease_s": None,
+        "server_ip": None,
+        "error": None,
+    }
+
+    # Locally-administered unicast MAC (bit1 of first octet set, bit0 clear)
+    fake_mac = bytes([0x02]) + secrets.token_bytes(5)
+    xid = int.from_bytes(secrets.token_bytes(4), "big")
+
+    def ip_checksum(data: bytes) -> int:
+        if len(data) % 2:
+            data += b"\x00"
+        s = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+        s = (s >> 16) + (s & 0xFFFF)
+        s += s >> 16
+        return ~s & 0xFFFF
+
+    def build_ethernet(src_mac: bytes, payload: bytes) -> bytes:
+        return b"\xff" * 6 + src_mac + b"\x08\x00" + payload
+
+    def build_ipv4(payload: bytes, src: bytes = b"\x00" * 4,
+                   dst: bytes = b"\xff" * 4) -> bytes:
+        tot = 20 + len(payload)
+        hdr = struct.pack("!BBHHHBBH4s4s",
+                          0x45, 0, tot, xid & 0xFFFF, 0, 64, 17, 0, src, dst)
+        ck = ip_checksum(hdr)
+        return hdr[:10] + struct.pack("!H", ck) + hdr[12:] + payload
+
+    def build_udp(src_port: int, dst_port: int, payload: bytes) -> bytes:
+        return struct.pack("!HHHH", src_port, dst_port, 8 + len(payload), 0) + payload
+
+    def build_dhcp(msg_type: int, offered_ip: str = "", server_ip: str = "") -> bytes:
+        msg = bytearray(236)
+        msg[0] = 1; msg[1] = 1; msg[2] = 6
+        struct.pack_into("!I", msg, 4, xid)
+        struct.pack_into("!H", msg, 10, 0x8000)  # broadcast flag
+        msg[28:34] = fake_mac
+        dhcp = bytes(msg) + b"\x63\x82\x53\x63"
+        dhcp += bytes([53, 1, msg_type])
+        dhcp += bytes([61, 7, 1]) + fake_mac
+        if msg_type == 3:
+            dhcp += bytes([50, 4]) + socket.inet_aton(offered_ip)
+            dhcp += bytes([54, 4]) + socket.inet_aton(server_ip)
+        dhcp += bytes([55, 3, 1, 3, 6])
+        dhcp += bytes([255])
+        return dhcp
+
+    def parse_dhcp(data: bytes):
+        if len(data) < 14 + 20 + 8 + 240:
+            return None
+        if data[12:14] != b"\x08\x00":
+            return None
+        ip_off = 14
+        ip_ihl = (data[ip_off] & 0x0F) * 4
+        if data[ip_off + 9] != 17:  # UDP
+            return None
+        udp_off = ip_off + ip_ihl
+        if struct.unpack("!H", data[udp_off + 2:udp_off + 4])[0] != 68:
+            return None
+        dhcp = data[udp_off + 8:]
+        if len(dhcp) < 240 or dhcp[0] != 2:
+            return None
+        if struct.unpack("!I", dhcp[4:8])[0] != xid:
+            return None
+        yiaddr = socket.inet_ntoa(dhcp[16:20])
+        msg_type_opt = server_id = lease_time = None
+        i = 240
+        while i < len(dhcp):
+            opt = dhcp[i]
+            if opt == 255:
+                break
+            if opt == 0:
+                i += 1
+                continue
+            if i + 1 >= len(dhcp):
+                break
+            length = dhcp[i + 1]
+            val = dhcp[i + 2: i + 2 + length]
+            if opt == 53 and length == 1:
+                msg_type_opt = val[0]
+            elif opt == 54 and length == 4:
+                server_id = socket.inet_ntoa(val)
+            elif opt == 51 and length == 4:
+                lease_time = struct.unpack("!I", val)[0]
+            i += 2 + length
+        return {"yiaddr": yiaddr, "msg_type": msg_type_opt,
+                "server_id": server_id, "lease_time": lease_time}
+
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+        sock.bind((interface, 0))
+        sock.settimeout(10)
+
+        t0 = time.monotonic()
+
+        disc = build_ethernet(fake_mac, build_ipv4(build_udp(68, 67, build_dhcp(1))))
+        sock.send(disc)
+        t_disc = time.monotonic()
+
+        offered_ip = server_ip_str = None
+        t_offer = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                frame, _ = sock.recvfrom(2048)
+                parsed = parse_dhcp(frame)
+                if parsed and parsed["msg_type"] == 2:
+                    offered_ip = parsed["yiaddr"]
+                    server_ip_str = parsed["server_id"]
+                    t_offer = time.monotonic()
+                    result["discover_ms"] = round((t_offer - t_disc) * 1000, 2)
+                    break
+            except socket.timeout:
+                break
+
+        if not offered_ip:
+            result["error"] = "No DHCP Offer received within 10s"
+            return result
+
+        req = build_ethernet(fake_mac, build_ipv4(
+            build_udp(68, 67, build_dhcp(3, offered_ip, server_ip_str or "0.0.0.0"))))
+        sock.send(req)
+        t_req = time.monotonic()
+
+        t_ack = lease_s = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                frame, _ = sock.recvfrom(2048)
+                parsed = parse_dhcp(frame)
+                if parsed and parsed["msg_type"] == 5:
+                    t_ack = time.monotonic()
+                    lease_s = parsed.get("lease_time")
+                    break
+                elif parsed and parsed["msg_type"] == 6:
+                    result["error"] = "DHCP NAK received"
+                    return result
+            except socket.timeout:
+                break
+
+        if not t_ack:
+            result["error"] = "No DHCP ACK received within 10s"
+            return result
+
+        try:
+            srv = server_ip_str or "255.255.255.255"
+            rel = build_ethernet(fake_mac, build_ipv4(
+                build_udp(68, 67, build_dhcp(7, offered_ip, srv)),
+                dst=socket.inet_aton(srv)))
+            sock.send(rel)
+        except Exception:
+            pass
+
+        result.update({
+            "success": True,
+            "offered_ip": offered_ip,
+            "server_ip": server_ip_str,
+            "lease_s": lease_s,
+            "ack_ms": round((t_ack - t_req) * 1000, 2),
+            "total_ms": round((t_ack - t0) * 1000, 2),
+        })
+
+    except PermissionError as e:
+        result["error"] = f"Permission denied: {e}"
+    except OSError as e:
+        result["error"] = f"Socket error: {e}"
+    except Exception as e:
+        result["error"] = f"dhcp_test failed: {e}"
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    return result
+
+
+
 
 def parse_traceroute(raw: str) -> list:
     """Parse traceroute -n output into structured hops."""
@@ -1199,6 +1396,9 @@ async def handle_command(ws, raw: str):
             max_size = max(576, min(max_size, 9000))
             result = await loop.run_in_executor(
                 None, run_mtu_test, target, max_size)
+        elif cmd == "dhcp_test":
+            iface = params.get("interface", "eth0")
+            result = await loop.run_in_executor(None, run_dhcp_test, iface)
         elif cmd == "config_update":
             # Atomic replace: build a new MonitorConfig and swap the module
             # reference. Read by the monitor loops as a single pointer deref,
