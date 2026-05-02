@@ -2,6 +2,7 @@
 D2 Edge Agent - Runs on each Raspberry Pi
 """
 import asyncio
+import errno
 import hmac
 import ipaddress
 import json
@@ -222,6 +223,49 @@ def require_auth(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+class SpawnFailureError(RuntimeError):
+    """Kernel/runtime refused to clone a process or start a thread.
+
+    Raised when fork/clone returns EAGAIN/ENOMEM, or threading reports
+    "can't start new thread" — i.e. the host has hit its PID/thread cap.
+    The probe wasn't actually attempted, so its result is meaningless and
+    the controller must NOT store it as a real failure.
+    """
+
+
+def _is_spawn_exhaustion(exc: BaseException) -> bool:
+    if isinstance(exc, BlockingIOError):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in (errno.EAGAIN, errno.ENOMEM):
+        return True
+    if isinstance(exc, RuntimeError) and "can't start new thread" in str(exc).lower():
+        return True
+    return False
+
+
+def _spawn_failure_result(cmd: str, params: dict, exc: BaseException) -> dict:
+    """Result dict for a probe that never ran due to host exhaustion.
+
+    `spawn_failure=True` is the contract with the controller: rows tagged
+    this way must NOT be stored as real probe results. Includes the
+    target/host/url so the controller can correlate without inferring
+    "unknown".
+    """
+    out = {
+        "success": False,
+        "spawn_failure": True,
+        "error": f"{type(exc).__name__}: {exc}",
+        "command": cmd,
+        "timestamp": time.time(),
+    }
+    for key in ("target", "host", "url", "gateway"):
+        val = (params or {}).get(key)
+        if val:
+            out[key] = val
+            break
+    return out
+
+
 def run_cmd(cmd: list, timeout: int = 60) -> tuple[bool, str]:
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=timeout)
@@ -231,6 +275,8 @@ def run_cmd(cmd: list, timeout: int = 60) -> tuple[bool, str]:
     except subprocess.CalledProcessError as e:
         return False, e.output.decode(errors="replace")
     except Exception as e:
+        if _is_spawn_exhaustion(e):
+            raise SpawnFailureError(f"{type(e).__name__}: {e}") from e
         return False, str(e)
 
 
@@ -383,28 +429,44 @@ def run_iperf_server(duration: int = 15) -> dict:
     try:
         subprocess.run(["fuser", "-k", "5201/tcp"], capture_output=True)
     except Exception as e:
+        if _is_spawn_exhaustion(e):
+            raise SpawnFailureError(f"iperf_server fuser fork failed: {e}") from e
         log.debug("fuser cleanup before iperf_server failed: %s", e)
     time.sleep(0.3)
     cmd = ["iperf3", "-s", "--one-off", "-J"]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(1.0)
-
-        def _reaper(p: subprocess.Popen, deadline: float) -> None:
-            try:
-                p.wait(timeout=deadline)
-            except subprocess.TimeoutExpired:
-                try:
-                    p.kill()
-                    log.warning("iperf_server PID %d killed - no client connected", p.pid)
-                except Exception as kill_e:
-                    log.warning("iperf_server reap kill failed: %s", kill_e)
-
-        threading.Thread(target=_reaper, args=(proc, duration + 30), daemon=True).start()
-        return {"status": "listening", "ip": local_ip}
     except Exception as e:
+        if _is_spawn_exhaustion(e):
+            raise SpawnFailureError(f"iperf_server iperf3 fork failed: {e}") from e
         log.warning("iperf_server start failed: %s", e)
         return {"error": "iperf server start failed"}
+    time.sleep(1.0)
+
+    def _reaper(p: subprocess.Popen, deadline: float) -> None:
+        try:
+            p.wait(timeout=deadline)
+        except subprocess.TimeoutExpired:
+            try:
+                p.kill()
+                log.warning("iperf_server PID %d killed - no client connected", p.pid)
+            except Exception as kill_e:
+                log.warning("iperf_server reap kill failed: %s", kill_e)
+
+    try:
+        threading.Thread(target=_reaper, args=(proc, duration + 30), daemon=True).start()
+    except Exception as e:
+        # Reaper thread couldn't start — kill the listener so we don't leak it,
+        # then signal exhaustion upstream.
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        if _is_spawn_exhaustion(e):
+            raise SpawnFailureError(f"iperf_server reaper thread failed: {e}") from e
+        log.warning("iperf_server reaper thread spawn failed: %s", e)
+        return {"error": "iperf server reaper failed"}
+    return {"status": "listening", "ip": local_ip}
 
 
 def run_ping(target: str, count: int = 10, size: int = 0, df: bool = False, interval: float = 1.0) -> dict:
@@ -538,7 +600,7 @@ def run_traceroute(target: str, use_mtr: bool = False, count: int = 10) -> dict:
                 return {"hops": hops, "target": target, "success": True, "type": "mtr", "raw": raw}
             except json.JSONDecodeError:
                 pass
-        return {"raw": raw, "success": False, "type": "mtr"}
+        return {"raw": raw, "success": False, "type": "mtr", "target": target, "hops": []}
     else:
         ok, raw = run_cmd(["traceroute", "-n", "-m", "20", target], timeout=60)
         hops = parse_traceroute(raw) if ok else []
@@ -834,7 +896,13 @@ def run_dns(target: str = "google.com", server: str = "", record_type: str = "A"
     if server:
         dig_cmd.append(f"@{server}")
     dig_cmd += [target, record_type]
-    ok, raw = run_cmd(dig_cmd, timeout=10)
+    try:
+        ok, raw = run_cmd(dig_cmd, timeout=10)
+    except SpawnFailureError as e:
+        # Host PID/thread exhaustion — fall through to in-process getaddrinfo
+        # so DNS health stays observable without needing to fork dig.
+        log.warning("dig spawn failed (%s); falling back to getaddrinfo", e)
+        ok, raw = False, str(e)
     if ok and raw:
         results["raw"] = raw
         for line in raw.splitlines():
@@ -1149,9 +1217,17 @@ async def handle_command(ws, raw: str):
             result = {"error": f"Unknown command: {cmd}"}
     except HTTPException as e:
         result = {"error": e.detail}
+    except SpawnFailureError as e:
+        log.error("Command %s aborted - host PID/thread exhaustion: %s", cmd, e)
+        result = _spawn_failure_result(cmd, params, e)
     except Exception as e:
-        log.warning("Command %s failed (%s): %s", cmd, type(e).__name__, e, exc_info=True)
-        result = {"error": f"{cmd} failed"}
+        if _is_spawn_exhaustion(e):
+            log.error("Command %s aborted - host PID/thread exhaustion (raw %s): %s",
+                      cmd, type(e).__name__, e)
+            result = _spawn_failure_result(cmd, params, e)
+        else:
+            log.warning("Command %s failed (%s): %s", cmd, type(e).__name__, e, exc_info=True)
+            result = {"error": f"{cmd} failed"}
 
     await ws.send(json.dumps({
         "type": "result",
@@ -1180,9 +1256,20 @@ async def gateway_monitor_loop(get_ws_func):
             gw = get_default_gateway()
             if gw:
                 loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None, run_ping, gw, 3, 0, False, 1.0
-                )
+                try:
+                    result = await loop.run_in_executor(
+                        None, run_ping, gw, 3, 0, False, 1.0
+                    )
+                except SpawnFailureError as e:
+                    log.error("Gateway monitor aborted - host PID/thread exhaustion: %s", e)
+                    result = _spawn_failure_result("gateway_monitor", {"gateway": gw}, e)
+                except Exception as e:
+                    if _is_spawn_exhaustion(e):
+                        log.error("Gateway monitor aborted - exhaustion (raw %s): %s",
+                                  type(e).__name__, e)
+                        result = _spawn_failure_result("gateway_monitor", {"gateway": gw}, e)
+                    else:
+                        raise
                 result["gateway"] = gw
                 result["timestamp"] = time.time()
                 ws = get_ws_func()
@@ -1197,8 +1284,9 @@ async def gateway_monitor_loop(get_ws_func):
                 })
                 if ws is not None:
                     await ws.send(payload)
-                else:
-                    # Buffer locally during outage
+                elif not result.get("spawn_failure"):
+                    # Buffer locally during outage. Skip spawn-failure stubs —
+                    # they're meaningless once the host recovers.
                     buffer_result("gateway_monitor", result)
             else:
                 log.debug("No default gateway found")
@@ -1217,9 +1305,21 @@ async def dns_monitor_loop(get_ws_func):
             if ws is not None:
                 for t in DNS_TARGETS:
                     try:
-                        result = await loop.run_in_executor(
-                            None, run_dns, t["target"], t["server"], t["record_type"]
-                        )
+                        try:
+                            result = await loop.run_in_executor(
+                                None, run_dns, t["target"], t["server"], t["record_type"]
+                            )
+                        except SpawnFailureError as e:
+                            log.error("DNS monitor aborted - host exhaustion: %s", e)
+                            result = _spawn_failure_result(
+                                "dns_monitor", {"target": t["target"]}, e)
+                        except Exception as e:
+                            if _is_spawn_exhaustion(e):
+                                log.error("DNS monitor aborted - exhaustion: %s", e)
+                                result = _spawn_failure_result(
+                                    "dns_monitor", {"target": t["target"]}, e)
+                            else:
+                                raise
                         result["label"] = t.get("label", "external")
                         await ws.send(json.dumps({
                             "type": "result",
@@ -1238,9 +1338,16 @@ async def dns_monitor_loop(get_ws_func):
         if get_ws_func() is None:
             try:
                 for t in DNS_TARGETS:
-                    result = await loop.run_in_executor(
-                        None, run_dns, t["target"], t["server"], t["record_type"]
-                    )
+                    try:
+                        result = await loop.run_in_executor(
+                            None, run_dns, t["target"], t["server"], t["record_type"]
+                        )
+                    except SpawnFailureError:
+                        continue
+                    except Exception as e:
+                        if _is_spawn_exhaustion(e):
+                            continue
+                        raise
                     buffer_result("dns_monitor", result)
             except Exception:
                 pass
@@ -1272,9 +1379,23 @@ async def traceroute_monitor_loop(get_ws_func):
             for t in targets:
                 target = t.get("target", t) if isinstance(t, dict) else t
                 try:
-                    result = await loop.run_in_executor(
-                        None, run_traceroute, target, True, 5
-                    )
+                    try:
+                        result = await loop.run_in_executor(
+                            None, run_traceroute, target, True, 5
+                        )
+                    except SpawnFailureError as e:
+                        log.error("Traceroute monitor aborted for %s - host exhaustion: %s",
+                                  target, e)
+                        result = _spawn_failure_result(
+                            "traceroute_monitor", {"target": target}, e)
+                    except Exception as e:
+                        if _is_spawn_exhaustion(e):
+                            log.error("Traceroute monitor aborted for %s - exhaustion: %s",
+                                      target, e)
+                            result = _spawn_failure_result(
+                                "traceroute_monitor", {"target": target}, e)
+                        else:
+                            raise
                     result["timestamp"] = time.time()
                     ws = get_ws_func()
                     payload = json.dumps({
@@ -1288,7 +1409,7 @@ async def traceroute_monitor_loop(get_ws_func):
                     })
                     if ws is not None:
                         await ws.send(payload)
-                    else:
+                    elif not result.get("spawn_failure"):
                         buffer_result("traceroute_monitor", result)
                 except Exception as e:
                     log.warning("Traceroute monitor error for %s: %s", target, e)
@@ -1336,9 +1457,19 @@ async def http_monitor_loop(get_ws_func):
                 try:
                     url = target.get("url", target) if isinstance(target, dict) else target
                     label = target.get("label", url) if isinstance(target, dict) else url
-                    result = await loop.run_in_executor(
-                        None, run_http_test, url
-                    )
+                    try:
+                        result = await loop.run_in_executor(
+                            None, run_http_test, url
+                        )
+                    except SpawnFailureError as e:
+                        log.error("HTTP monitor aborted for %s - host exhaustion: %s", url, e)
+                        result = _spawn_failure_result("http_monitor", {"url": url}, e)
+                    except Exception as e:
+                        if _is_spawn_exhaustion(e):
+                            log.error("HTTP monitor aborted for %s - exhaustion: %s", url, e)
+                            result = _spawn_failure_result("http_monitor", {"url": url}, e)
+                        else:
+                            raise
                     result["label"] = label
                     result["timestamp"] = time.time()
                     ws = get_ws_func()
@@ -1353,7 +1484,7 @@ async def http_monitor_loop(get_ws_func):
                     })
                     if ws is not None:
                         await ws.send(payload)
-                    else:
+                    elif not result.get("spawn_failure"):
                         buffer_result("http_monitor", result)
                 except Exception as e:
                     log.warning("HTTP monitor error for %s: %s", target, e)
