@@ -33,6 +33,22 @@ if [[ -f "$ENV_FILE" ]]; then
 
     grep -qE '^[[:space:]]+[A-Z_]+=' "$ENV_FILE" \
         && fail ".env has lines with leading whitespace before KEY= — strip it"
+
+    # Conflicting duplicate keys: same key, different values. Bash sourcing
+    # silently takes the last occurrence — masking operator intent. Same-
+    # value duplicates are auto-deduped by update.sh so they don't reach
+    # here; if they do, we still flag them as cosmetic noise via 'cosmetic'
+    # set (non-blocking).
+    while IFS= read -r dupkey; do
+        [[ -z "$dupkey" ]] && continue
+        # shellcheck disable=SC2016
+        vals=$(grep -E "^${dupkey}=" "$ENV_FILE" | awk -F= '{$1=""; sub(/^ /,""); print}' | sort -u | wc -l)
+        if (( vals > 1 )); then
+            fail ".env has conflicting duplicate key '$dupkey' (multiple values) — keep one"
+        else
+            echo "  preflight: WARN .env has same-value duplicate '$dupkey' (auto-fixed by update.sh)" >&2
+        fi
+    done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | cut -d= -f1 | sort | uniq -d)
 fi
 
 # --- 3. Required keys present + non-empty -------------------------------

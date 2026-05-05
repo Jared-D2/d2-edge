@@ -135,7 +135,10 @@ echo "  Disabled: rpcbind, NFS, CUPS, ModemManager, avahi, lightdm"
 
 # Unattended upgrades
 dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1
-echo "  Unattended upgrades: enabled"
+# Auto-reboot drop-in placeholder — repo isn't cloned yet, so the real
+# install happens after [7/8]. We just record intent here; the post-clone
+# block below copies shared/files/52-d2-auto-reboot.conf in place.
+echo "  Unattended upgrades: enabled (auto-reboot installed post-clone)"
 
 # Mark /opt/d2-edge safe for the admin user's git — without this,
 # update.sh (runs `sudo -u admin git pull`) fails with 'dubious ownership'
@@ -156,6 +159,20 @@ fi
 # runs as admin) can write .git state. Keep .env at root:root 600 — secrets.
 chown -R admin:admin "${EDGE_DIR}"
 [[ -f "${EDGE_DIR}/.env" ]] && chown root:root "${EDGE_DIR}/.env" && chmod 600 "${EDGE_DIR}/.env"
+
+# Install auto-reboot drop-in now that the repo content is available.
+# Higher-numbered drop-in (52 vs stock 50) wins over distro defaults.
+DROPIN_SRC="${EDGE_DIR}/shared/files/52-d2-auto-reboot.conf"
+if [[ -f "$DROPIN_SRC" ]]; then
+    install -m 0644 -o root -g root "$DROPIN_SRC" /etc/apt/apt.conf.d/52-d2-auto-reboot
+    echo "  Auto-reboot policy: 02:00 nightly when reboot-required (52-d2-auto-reboot)"
+fi
+
+# Provision the Oxidized bastion user (svc_oxidized_proxy, nologin shell,
+# locked authorized_keys). Idempotent — safe to run on every bootstrap.
+if [[ -x "${EDGE_DIR}/scripts/setup-oxidized-proxy-user.sh" ]]; then
+    bash "${EDGE_DIR}/scripts/setup-oxidized-proxy-user.sh"
+fi
 
 
 # ─── Log rotation ─────────────────────────────────────────────────────────
