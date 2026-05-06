@@ -273,7 +273,17 @@ def run_cmd(cmd: list, timeout: int = 60) -> tuple[bool, str]:
     except subprocess.TimeoutExpired:
         return False, "Command timed out"
     except subprocess.CalledProcessError as e:
-        return False, e.output.decode(errors="replace")
+        out = e.output.decode(errors='replace')
+        # glibc-internal getaddrinfo can fail when its async resolver thread
+        # can't start under PID/thread exhaustion. The subprocess (e.g. curl)
+        # exits non-zero but the underlying cause is *spawn* failure, not
+        # a real network/HTTP error. Detect it so the result is not stored
+        # as a legitimate probe failure (covers IP-literal URLs that bypass
+        # the Python-side _resolve_and_check guard).
+        if 'thread failed to start' in out.lower():
+            raise SpawnFailureError(
+                f'subprocess thread starvation: {out.strip()[:200]}') from e
+        return False, out
     except Exception as e:
         if _is_spawn_exhaustion(e):
             raise SpawnFailureError(f"{type(e).__name__}: {e}") from e
@@ -864,7 +874,26 @@ def _resolve_and_check(host: str) -> tuple[bool, list]:
     # Hostname — resolve every A/AAAA record and check each.
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
+    except socket.gaierror as e:
+        # EAI_AGAIN / EAI_SYSTEM are ambiguous: they fire both for
+        # DNS-server-unreachable AND for getaddrinfo's async resolver
+        # thread failing to start under PID/thread exhaustion. Disambiguate
+        # with a trivial fork sentinel — if subprocess also can't spawn,
+        # the host is in exhaustion and we must NOT store this as a real
+        # probe failure (raise SpawnFailureError so the loop emits a
+        # tagged result the controller skips). If fork works, the gaierror
+        # is name-specific and we keep the block-defensively contract.
+        if e.errno in (getattr(socket, 'EAI_AGAIN', -3),
+                       getattr(socket, 'EAI_SYSTEM', -11)):
+            try:
+                subprocess.run(['true'], capture_output=True,
+                               timeout=2, check=True)
+            except (BlockingIOError, OSError) as fork_err:
+                fe = getattr(fork_err, 'errno', None)
+                if isinstance(fork_err, BlockingIOError) or fe in (errno.EAGAIN, errno.ENOMEM):
+                    raise SpawnFailureError(
+                        f'getaddrinfo+fork both failing for {host}: {e}') from e
+            # fork OK → DNS itself is the problem; block defensively.
         return True, []  # unresolvable — block defensively
     def _ip_sort_key(ip_str):
         try:

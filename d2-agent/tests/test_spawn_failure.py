@@ -169,3 +169,84 @@ class TestSpawnFailureResultHelper:
         assert "target" not in out
         assert "host" not in out
         assert out["spawn_failure"] is True
+
+
+
+class TestResolveAndCheckTransient:
+    """_resolve_and_check must distinguish transient resolver exhaustion
+    (EAI_AGAIN/EAI_SYSTEM under thread-spawn pressure) from a name-specific
+    DNS failure. Disambiguation via a fork sentinel: if fork also fails,
+    raise SpawnFailureError; if fork succeeds, block defensively as before.
+    """
+    def test_eai_again_with_fork_failure_raises_spawn(self, monkeypatch):
+        import socket, subprocess
+        monkeypatch.setattr(app.socket, 'getaddrinfo',
+            lambda *a, **kw: (_ for _ in ()).throw(
+                socket.gaierror(socket.EAI_AGAIN, 'Temporary failure in name resolution')))
+        monkeypatch.setattr(app.subprocess, 'run',
+            lambda *a, **kw: (_ for _ in ()).throw(BlockingIOError(11, 'EAGAIN')))
+        with pytest.raises(app.SpawnFailureError):
+            app._resolve_and_check('login.microsoftonline.com')
+
+    def test_eai_again_with_fork_ok_blocks_defensively(self, monkeypatch):
+        import socket, subprocess
+        monkeypatch.setattr(app.socket, 'getaddrinfo',
+            lambda *a, **kw: (_ for _ in ()).throw(
+                socket.gaierror(socket.EAI_AGAIN, 'Temporary failure in name resolution')))
+        # default real subprocess.run is fine — fork works in test env
+        blocked, ips = app._resolve_and_check('does-not-exist-anywhere.invalid')
+        assert blocked is True
+        assert ips == []
+
+    def test_eai_noname_blocks_defensively(self, monkeypatch):
+        import socket
+        monkeypatch.setattr(app.socket, 'getaddrinfo',
+            lambda *a, **kw: (_ for _ in ()).throw(
+                socket.gaierror(socket.EAI_NONAME, 'Name or service not known')))
+        blocked, ips = app._resolve_and_check('does-not-exist.invalid')
+        assert blocked is True
+        assert ips == []
+
+    def test_ip_literal_skips_getaddrinfo(self, monkeypatch):
+        import socket
+        called = []
+        def boom(*a, **kw):
+            called.append(1)
+            raise socket.gaierror(socket.EAI_AGAIN, 'should not be called')
+        monkeypatch.setattr(app.socket, 'getaddrinfo', boom)
+        blocked, ips = app._resolve_and_check('1.1.1.1')
+        assert blocked is False
+        assert ips == ['1.1.1.1']
+        assert not called
+
+
+class TestRunCmdGlibcThreadStarvation:
+    """run_cmd must raise SpawnFailureError when subprocess exited non-zero
+    but the underlying cause was glibc-internal getaddrinfo() unable to
+    start its async resolver thread (curl exit 6 with 'thread failed to
+    start' output). Without this, IP-literal URLs that bypass the Python
+    _resolve_and_check guard would be stored as real probe failures.
+    """
+    def test_curl_thread_failed_to_start_raises_spawn(self, monkeypatch):
+        import subprocess
+        def fake(*a, **kw):
+            raise subprocess.CalledProcessError(
+                returncode=6, cmd=a[0],
+                output=(b'curl: (6) Could not resolve host: 1.1.1.1'
+                        + bytes([10])
+                        + b'getaddrinfo() thread failed to start'
+                        + bytes([10])))
+        monkeypatch.setattr(app.subprocess, 'check_output', fake)
+        with pytest.raises(app.SpawnFailureError):
+            app.run_cmd(['curl', 'https://1.1.1.1'])
+
+    def test_curl_real_network_error_returns_false_tuple(self, monkeypatch):
+        import subprocess
+        def fake(*a, **kw):
+            raise subprocess.CalledProcessError(
+                returncode=7, cmd=a[0],
+                output=b'curl: (7) Failed to connect to 10.0.0.1 port 443: Connection refused')
+        monkeypatch.setattr(app.subprocess, 'check_output', fake)
+        ok, msg = app.run_cmd(['curl', 'https://10.0.0.1'])
+        assert ok is False
+        assert 'Connection refused' in msg
