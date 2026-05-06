@@ -181,6 +181,8 @@ class TestResolveAndCheckTransient:
     'getaddrinfo() thread failed to start' pressure.
     """
     def test_eai_again_with_thread_starvation_raises_spawn(self, monkeypatch):
+        # Reset thread-spawn cache so monkeypatched start() actually runs.
+        monkeypatch.setattr(app, "_thread_spawn_last_ok_ts", 0.0)
         import socket
         monkeypatch.setattr(app.socket, 'getaddrinfo',
             lambda *a, **kw: (_ for _ in ()).throw(
@@ -210,6 +212,8 @@ class TestThreadSpawnSentinel:
     pass silently when threads can start normally.
     """
     def test_thread_spawn_failure_raises_spawn(self, monkeypatch):
+        # Reset thread-spawn cache so monkeypatched start() actually runs.
+        monkeypatch.setattr(app, "_thread_spawn_last_ok_ts", 0.0)
         def _fail_start(self):
             raise RuntimeError("can't start new thread")
         monkeypatch.setattr(app.threading.Thread, 'start', _fail_start)
@@ -222,6 +226,8 @@ class TestThreadSpawnSentinel:
         assert True
 
     def test_thread_spawn_unrelated_runtime_error_propagates(self, monkeypatch):
+        # Reset thread-spawn cache so monkeypatched start() actually runs.
+        monkeypatch.setattr(app, "_thread_spawn_last_ok_ts", 0.0)
         def _fail_start(self):
             raise RuntimeError('something else entirely')
         monkeypatch.setattr(app.threading.Thread, 'start', _fail_start)

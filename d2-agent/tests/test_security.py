@@ -301,6 +301,10 @@ class TestTcpTimeSsrf:
                 seen["addr"] = addr
                 return 0
             def close(self): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): self.close()
+            def __enter__(self): return self
+            def __exit__(self, *a): self.close()
 
         monkeypatch.setattr(app.socket, "socket", lambda *_a, **_kw: FakeSock())
         r = app.run_tcp_time("host.example.com", 443, timeout=1)

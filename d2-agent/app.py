@@ -242,6 +242,14 @@ class SpawnFailureError(RuntimeError):
 _mtr_semaphore = threading.Semaphore(4)
 
 
+# Cache a known-good thread-spawn check for a short TTL so we don't
+# burn ~100 microseconds-1ms on every probe. 5s is short enough that
+# exhaustion is detected within one probe cycle, long enough to amortize
+# the overhead across the dozens of HTTP/DNS/etc probes per cycle.
+_thread_spawn_last_ok_ts = 0.0
+_THREAD_SPAWN_TTL = 5.0
+
+
 def _check_thread_spawn() -> None:
     """Test whether kernel.threads-max has room. Raises SpawnFailureError if not.
 
@@ -250,13 +258,22 @@ def _check_thread_spawn() -> None:
     own resolver thread, is `kernel.threads-max`. The cleanest probe for that
     cap is to actually try spawning a thread — pthread_create raises
     RuntimeError("can't start new thread") immediately when the cap is hit.
+
+    Cached for `_THREAD_SPAWN_TTL` seconds after a successful check to keep
+    per-probe overhead negligible.
     """
+    global _thread_spawn_last_ok_ts
+    now = time.monotonic()
+    if now - _thread_spawn_last_ok_ts < _THREAD_SPAWN_TTL:
+        return
     try:
         t = threading.Thread(target=lambda: None, daemon=True)
         t.start()
         t.join(timeout=1)
+        _thread_spawn_last_ok_ts = now
     except RuntimeError as e:
         if "can't start new thread" in str(e).lower():
+            _thread_spawn_last_ok_ts = 0.0
             raise SpawnFailureError(f"thread spawn unavailable: {e}") from e
         raise
 
@@ -1037,14 +1054,14 @@ def run_tcp_time(host: str, port: int = 443, timeout: int = 5) -> dict:
     target_ip = ips[0]
     try:
         # AF-agnostic so IPv6 resolutions still work. getaddrinfo returned
-        # sorted IPs, so target_ip is deterministic across calls.
+        # sorted IPs, so target_ip is deterministic across calls. Context
+        # manager guarantees close() even if connect_ex raises.
         family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
-        s = socket.socket(family, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        t0 = time.time()
-        err = s.connect_ex((target_ip, port))
-        elapsed = round((time.time() - t0) * 1000, 2)
-        s.close()
+        with socket.socket(family, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            t0 = time.time()
+            err = s.connect_ex((target_ip, port))
+            elapsed = round((time.time() - t0) * 1000, 2)
         result["success"] = err == 0
         result["connect_ms"] = elapsed if err == 0 else None
         result["resolved_ip"] = target_ip
@@ -1110,12 +1127,11 @@ def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
             if not ports:
                 ports = [443]
             family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
-            s = socket.socket(family, socket.SOCK_STREAM)
-            s.settimeout(5)
-            start = time.time()
-            r = s.connect_ex((target_ip, ports[0]))
-            elapsed = round((time.time() - start) * 1000, 2)
-            s.close()
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.settimeout(5)
+                start = time.time()
+                r = s.connect_ex((target_ip, ports[0]))
+                elapsed = round((time.time() - start) * 1000, 2)
             result["reachable"] = r == 0
             result["latency_ms"] = elapsed if r == 0 else None
             result["error"] = raw[:200]
@@ -1159,6 +1175,11 @@ def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
 
 def run_dns(target: str = "google.com", server: str = "", record_type: str = "A") -> dict:
     """DNS resolution test using dig if available, fallback to socket."""
+    # Pre-flight: under thread starvation both dig (subprocess) and the
+    # getaddrinfo fallback fail in different ways; raise SpawnFailureError
+    # up front so the loop emits a tagged result instead of storing a
+    # spurious DNS failure.
+    _check_thread_spawn()
     results = {}
     dig_cmd = ["dig", "+stats", "+noall", "+answer", "+time=3", "+tries=1"]
     if server:
@@ -1334,7 +1355,9 @@ async def controller_ws_loop():
                     log.info("Flushed %d buffered results", len(flushed_ids))
 
                 async def heartbeat():
-                    last_ts_ip = get_tailscale_ip()
+                    # get_tailscale_ip runs subprocess; off-load to a thread so
+                    # the event loop never blocks on it (5s default timeout).
+                    last_ts_ip = await asyncio.to_thread(get_tailscale_ip)
                     while True:
                         await asyncio.sleep(HEARTBEAT_INTERVAL)
                         try:
@@ -1343,8 +1366,7 @@ async def controller_ws_loop():
                                 "agent_id": AGENT_ID,
                                 "timestamp": time.time(),
                             }))
-                            # Detect Tailscale IP change and report it
-                            cur_ts_ip = get_tailscale_ip()
+                            cur_ts_ip = await asyncio.to_thread(get_tailscale_ip)
                             if cur_ts_ip and cur_ts_ip != last_ts_ip:
                                 log.info("Tailscale IP changed: %s -> %s", last_ts_ip, cur_ts_ip)
                                 await ws.send(json.dumps({
@@ -1355,7 +1377,10 @@ async def controller_ws_loop():
                                     "timestamp": time.time(),
                                 }))
                                 last_ts_ip = cur_ts_ip
-                        except Exception:
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            log.warning("Heartbeat exiting on exception: %s", e)
                             break
 
                 hb_task = asyncio.create_task(heartbeat())
@@ -1365,6 +1390,13 @@ async def controller_ws_loop():
                         await handle_command(ws, raw)
                 finally:
                     hb_task.cancel()
+                    # Await so the heartbeat fully unwinds before the next
+                    # reconnect creates a new task. Otherwise a mid-send
+                    # heartbeat can race the new ws connection.
+                    try:
+                        await hb_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
         except Exception as e:
             _current_ws = None
@@ -1443,23 +1475,23 @@ def run_zoom_test() -> dict:
         stun_req = struct.pack("!HHI", 0x0001, 0, 0x2112A442) + tx_id
 
         family = _sock.AF_INET6 if ":" in zoom_ip else _sock.AF_INET
-        udp = _sock.socket(family, _sock.SOCK_DGRAM)
-        udp.settimeout(3)
-        try:
-            t0 = time.time()
-            udp.sendto(stun_req, (zoom_ip, 3478))
-            data, _ = udp.recvfrom(2048)
-            elapsed_ms = round((time.time() - t0) * 1000, 2)
-            # STUN Success Response type is 0x0101
-            if len(data) >= 4:
-                msg_type = struct.unpack("!H", data[:2])[0]
-                if msg_type == 0x0101:
-                    result["udp_3478_ok"] = True
-                    result["udp_3478_ms"] = elapsed_ms
-        except _sock.timeout:
-            pass  # udp_3478_ok stays False
-        finally:
-            udp.close()
+        # Context manager guarantees close even if settimeout / sendto raises
+        # before reaching the inner try/finally.
+        with _sock.socket(family, _sock.SOCK_DGRAM) as udp:
+            udp.settimeout(3)
+            try:
+                t0 = time.time()
+                udp.sendto(stun_req, (zoom_ip, 3478))
+                data, _ = udp.recvfrom(2048)
+                elapsed_ms = round((time.time() - t0) * 1000, 2)
+                # STUN Success Response type is 0x0101
+                if len(data) >= 4:
+                    msg_type = struct.unpack("!H", data[:2])[0]
+                    if msg_type == 0x0101:
+                        result["udp_3478_ok"] = True
+                        result["udp_3478_ms"] = elapsed_ms
+            except _sock.timeout:
+                pass  # udp_3478_ok stays False
     except Exception as e:
         result["error"] = (result["error"] or "") + f" udp3478: {e}"
 
