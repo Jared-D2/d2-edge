@@ -52,7 +52,7 @@ echo "  OK"
 # ─── Install dependencies ─────────────────────────────────────────────────
 echo ""
 echo "[3/8] Installing dependencies..."
-apt-get install -y -qq     curl git nano chrony logrotate ca-certificates     gnupg lsb-release apt-transport-https     ufw fail2ban unattended-upgrades
+apt-get install -y -qq     curl git nano chrony logrotate ca-certificates     gnupg lsb-release apt-transport-https     ufw fail2ban unattended-upgrades     snmp
 echo "  OK"
 
 # ─── Install Docker ───────────────────────────────────────────────────────
