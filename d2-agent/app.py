@@ -1400,13 +1400,15 @@ def run_zoom_test() -> dict:
 
     # ── UDP 3478 STUN ──────────────────────────────────────────────────────
     try:
-        # Resolve stun.zoom.us — Zoom's actual STUN endpoint. Sending STUN
-        # to zoom.us:3478 (the marketing/web hostname) gets no response
-        # because there is no STUN responder there, which is why every
-        # agent in the fleet had udp_3478_ok=False since this probe shipped.
+        # Resolve stun.cloudflare.com — public STUN on the standard port
+        # 3478. Tests "is UDP 3478 outbound reachable" which is the
+        # network-level question for Zoom (whose actual media endpoints are
+        # dynamic per-meeting IPs with no stable hostname). Earlier targets
+        # zoom.us and stun.zoom.us were both wrong: zoom.us:3478 has no
+        # STUN responder; stun.zoom.us is not a published DNS record.
         import socket as _sock
         try:
-            addrs = _sock.getaddrinfo("stun.zoom.us", 3478, _sock.AF_UNSPEC, _sock.SOCK_DGRAM)
+            addrs = _sock.getaddrinfo("stun.cloudflare.com", 3478, _sock.AF_UNSPEC, _sock.SOCK_DGRAM)
             zoom_ip = addrs[0][4][0]
         except Exception as resolve_err:
             raise OSError(f"DNS resolution failed: {resolve_err}")
