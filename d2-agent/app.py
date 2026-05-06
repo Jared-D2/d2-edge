@@ -84,6 +84,12 @@ def _set_monitor_config(cfg: MonitorConfig) -> None:
 def init_buffer_db() -> None:
     """Initialize local SQLite buffer for outage data retention."""
     conn = sqlite3.connect(BUFFER_DB)
+    # WAL mode: probe inserts no longer block on cleanup DELETEs and vice
+    # versa. The setting persists in the DB file, so subsequent connect()s
+    # inherit it. Synchronous=NORMAL is the WAL-recommended pairing —
+    # durable to commit, fast enough for our probe cadence.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS buffered_results (
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
         command   TEXT NOT NULL,
@@ -121,9 +127,11 @@ def cleanup_buffer_db() -> None:
 
 
 async def buffer_cleanup_loop() -> None:
-    """Run cleanup every hour."""
+    """Run cleanup every 5 minutes — keeps the over-cap excess tight
+    (one probe-cycle's worth of rows max) instead of letting it
+    accumulate for a full hour between trims."""
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(300)
         cleanup_buffer_db()
 
 def buffer_result(command: str, result: dict) -> None:
