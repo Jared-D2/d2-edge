@@ -175,28 +175,60 @@ class TestSpawnFailureResultHelper:
 class TestResolveAndCheckTransient:
     """_resolve_and_check must distinguish transient resolver exhaustion
     (EAI_AGAIN/EAI_SYSTEM under thread-spawn pressure) from a name-specific
-    DNS failure. Disambiguation via a fork sentinel: if fork also fails,
-    raise SpawnFailureError; if fork succeeds, block defensively as before.
+    DNS failure. Disambiguation via a thread-spawn sentinel: if pthread_create
+    also fails, raise SpawnFailureError; if it succeeds, block defensively
+    as before. Threads (not forks) are what's exhausted under
+    'getaddrinfo() thread failed to start' pressure.
     """
-    def test_eai_again_with_fork_failure_raises_spawn(self, monkeypatch):
-        import socket, subprocess
+    def test_eai_again_with_thread_starvation_raises_spawn(self, monkeypatch):
+        import socket
         monkeypatch.setattr(app.socket, 'getaddrinfo',
             lambda *a, **kw: (_ for _ in ()).throw(
                 socket.gaierror(socket.EAI_AGAIN, 'Temporary failure in name resolution')))
-        monkeypatch.setattr(app.subprocess, 'run',
-            lambda *a, **kw: (_ for _ in ()).throw(BlockingIOError(11, 'EAGAIN')))
+        # Simulate pthread_create failure inside _check_thread_spawn:
+        # threading.Thread.start raises RuntimeError when threads-max is hit.
+        def _fail_start(self):
+            raise RuntimeError("can't start new thread")
+        monkeypatch.setattr(app.threading.Thread, 'start', _fail_start)
         with pytest.raises(app.SpawnFailureError):
             app._resolve_and_check('login.microsoftonline.com')
 
-    def test_eai_again_with_fork_ok_blocks_defensively(self, monkeypatch):
-        import socket, subprocess
+    def test_eai_again_with_threads_ok_blocks_defensively(self, monkeypatch):
+        import socket
         monkeypatch.setattr(app.socket, 'getaddrinfo',
             lambda *a, **kw: (_ for _ in ()).throw(
                 socket.gaierror(socket.EAI_AGAIN, 'Temporary failure in name resolution')))
-        # default real subprocess.run is fine — fork works in test env
+        # default threading.Thread is fine — sentinel passes
         blocked, ips = app._resolve_and_check('does-not-exist-anywhere.invalid')
         assert blocked is True
         assert ips == []
+
+
+class TestThreadSpawnSentinel:
+    """_check_thread_spawn() must raise SpawnFailureError when pthread_create
+    fails with 'can't start new thread' (kernel.threads-max exhausted) and
+    pass silently when threads can start normally.
+    """
+    def test_thread_spawn_failure_raises_spawn(self, monkeypatch):
+        def _fail_start(self):
+            raise RuntimeError("can't start new thread")
+        monkeypatch.setattr(app.threading.Thread, 'start', _fail_start)
+        with pytest.raises(app.SpawnFailureError):
+            app._check_thread_spawn()
+
+    def test_thread_spawn_ok_passes_silently(self):
+        # Real thread spawn — should succeed in test env.
+        app._check_thread_spawn()  # no exception
+        assert True
+
+    def test_thread_spawn_unrelated_runtime_error_propagates(self, monkeypatch):
+        def _fail_start(self):
+            raise RuntimeError('something else entirely')
+        monkeypatch.setattr(app.threading.Thread, 'start', _fail_start)
+        # Non-thread-related RuntimeError should propagate, NOT become SpawnFailureError.
+        with pytest.raises(RuntimeError) as ei:
+            app._check_thread_spawn()
+        assert not isinstance(ei.value, app.SpawnFailureError)
 
     def test_eai_noname_blocks_defensively(self, monkeypatch):
         import socket

@@ -242,6 +242,25 @@ class SpawnFailureError(RuntimeError):
 _mtr_semaphore = threading.Semaphore(4)
 
 
+def _check_thread_spawn() -> None:
+    """Test whether kernel.threads-max has room. Raises SpawnFailureError if not.
+
+    Forks succeed under thread starvation (fork() doesn't allocate a new pthread).
+    What blocks `getaddrinfo()`'s internal async resolver thread, and curl's
+    own resolver thread, is `kernel.threads-max`. The cleanest probe for that
+    cap is to actually try spawning a thread — pthread_create raises
+    RuntimeError("can't start new thread") immediately when the cap is hit.
+    """
+    try:
+        t = threading.Thread(target=lambda: None, daemon=True)
+        t.start()
+        t.join(timeout=1)
+    except RuntimeError as e:
+        if "can't start new thread" in str(e).lower():
+            raise SpawnFailureError(f"thread spawn unavailable: {e}") from e
+        raise
+
+
 def _is_spawn_exhaustion(exc: BaseException) -> bool:
     if isinstance(exc, BlockingIOError):
         return True
@@ -903,15 +922,12 @@ def _resolve_and_check(host: str) -> tuple[bool, list]:
         # is name-specific and we keep the block-defensively contract.
         if e.errno in (getattr(socket, 'EAI_AGAIN', -3),
                        getattr(socket, 'EAI_SYSTEM', -11)):
-            try:
-                subprocess.run(['true'], capture_output=True,
-                               timeout=2, check=True)
-            except (BlockingIOError, OSError) as fork_err:
-                fe = getattr(fork_err, 'errno', None)
-                if isinstance(fork_err, BlockingIOError) or fe in (errno.EAGAIN, errno.ENOMEM):
-                    raise SpawnFailureError(
-                        f'getaddrinfo+fork both failing for {host}: {e}') from e
-            # fork OK → DNS itself is the problem; block defensively.
+            # EAI_AGAIN under thread-spawn pressure: getaddrinfo's internal
+            # async resolver thread couldn't start. The thread sentinel
+            # raises SpawnFailureError if pthread_create itself fails.
+            # If the sentinel passes, the gaierror is name-specific and we
+            # block defensively as before.
+            _check_thread_spawn()  # raises SpawnFailureError on exhaustion
         return True, []  # unresolvable — block defensively
     def _ip_sort_key(ip_str):
         try:
@@ -927,6 +943,14 @@ def _resolve_and_check(host: str) -> tuple[bool, list]:
 
 def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) -> dict:
     """HTTP/HTTPS response time test using curl timing metrics."""
+    # Pre-flight: if the host is in thread-spawn exhaustion, both
+    # _resolve_and_check (Python getaddrinfo) and curl-internal getaddrinfo
+    # will fail in different ways. Raise SpawnFailureError up front so the
+    # http_monitor_loop emits a tagged result the controller skips, instead
+    # of storing success=0 with NULL fields as a real probe failure.
+    # Curl's own "thread failed to start" message is suppressed by -s so
+    # run_cmd's string classifier can't catch it after the fact.
+    _check_thread_spawn()
     # Default scheme: https
     if not url.lower().startswith(URL_ALLOWED_SCHEMES):
         if "://" in url:
@@ -1725,8 +1749,12 @@ async def traceroute_monitor_loop(get_ws_func):
                 target = t.get("target", t) if isinstance(t, dict) else t
                 try:
                     try:
+                        # use_mtr=False: plain traceroute. mtr in this loop has
+                        # repeatedly leaked under thread-spawn pressure (mtr forks
+                        # a mtr-packet helper that fails to start, then mtr hangs).
+                        # Plain traceroute has no helper-fork dependency.
                         result = await loop.run_in_executor(
-                            None, run_traceroute, target, True, 5
+                            None, run_traceroute, target, False, 5
                         )
                     except SpawnFailureError as e:
                         log.error("Traceroute monitor aborted for %s - host exhaustion: %s",
