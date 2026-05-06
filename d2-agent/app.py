@@ -233,6 +233,15 @@ class SpawnFailureError(RuntimeError):
     """
 
 
+# Cap concurrent mtr invocations across the whole process. The 2026-05-04
+# nib001-sy-pi01 incident showed 14+ concurrent mtr subprocesses parented
+# to the agent, accumulated under thread-spawn pressure where each mtr's
+# own subprocess.communicate wait failed to reap. With this cap, runaway
+# accumulation is bounded and excess invocations queue at the semaphore
+# instead of saturating the container's PID/thread quota.
+_mtr_semaphore = threading.Semaphore(4)
+
+
 def _is_spawn_exhaustion(exc: BaseException) -> bool:
     if isinstance(exc, BlockingIOError):
         return True
@@ -787,7 +796,16 @@ def parse_traceroute(raw: str) -> list:
 def run_traceroute(target: str, use_mtr: bool = False, count: int = 10) -> dict:
     """Run traceroute or mtr and return structured hop data."""
     if use_mtr:
-        ok, raw = run_cmd(["mtr", "--json", "-c", str(count), "-n", target], timeout=count * 2 + 30)
+        # Bound concurrent mtr invocations to 4 (see _mtr_semaphore comment).
+        # Acquire with a generous timeout so legitimate queueing waits but
+        # we never block forever if all 4 slots are stuck.
+        if not _mtr_semaphore.acquire(timeout=count * 2 + 60):
+            return {"raw": "mtr concurrency limit reached", "success": False,
+                    "type": "mtr", "target": target, "hops": []}
+        try:
+            ok, raw = run_cmd(["mtr", "--json", "-c", str(count), "-n", target], timeout=count * 2 + 30)
+        finally:
+            _mtr_semaphore.release()
         if ok:
             try:
                 mtr_data = json.loads(raw)
@@ -1382,10 +1400,13 @@ def run_zoom_test() -> dict:
 
     # ── UDP 3478 STUN ──────────────────────────────────────────────────────
     try:
-        # Resolve zoom.us to a single IP (reuse existing safe resolver)
+        # Resolve stun.zoom.us — Zoom's actual STUN endpoint. Sending STUN
+        # to zoom.us:3478 (the marketing/web hostname) gets no response
+        # because there is no STUN responder there, which is why every
+        # agent in the fleet had udp_3478_ok=False since this probe shipped.
         import socket as _sock
         try:
-            addrs = _sock.getaddrinfo("zoom.us", 3478, _sock.AF_UNSPEC, _sock.SOCK_DGRAM)
+            addrs = _sock.getaddrinfo("stun.zoom.us", 3478, _sock.AF_UNSPEC, _sock.SOCK_DGRAM)
             zoom_ip = addrs[0][4][0]
         except Exception as resolve_err:
             raise OSError(f"DNS resolution failed: {resolve_err}")

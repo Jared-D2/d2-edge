@@ -143,6 +143,14 @@ services:
     profiles: ["${DEPLOY_D2_AGENT:-enabled}"]
     restart: unless-stopped
     network_mode: host
+    # Bound the container's PID/thread budget so a leak (e.g. accumulated
+    # mtr/iperf children under thread-spawn pressure) saturates the
+    # container's quota and fails its own probes cleanly, instead of
+    # bleeding into the host's kernel.threads-max budget where it would
+    # also disrupt the sibling stack (tailscale, zabbix-proxy, syslog-proxy,
+    # freeradius-proxy, auvik). 256 is comfortably above steady-state usage
+    # observed in production.
+    pids_limit: 256
     depends_on:
       tailscale:
         condition: service_healthy
