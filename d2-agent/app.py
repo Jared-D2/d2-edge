@@ -1007,13 +1007,13 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
         "size_bytes=%{size_download}\n"
         "url_final=%{url_effective}\n"
     )
-    cmd = ["curl", "-o", "/dev/null", "-s", "-w", fmt,
+    cmd = ["curl", "-o", "/dev/null", "-sS", "-w", fmt,
            "--max-time", str(timeout),
            "--connect-timeout", "5"]
     # Pin to a resolved IP so curl cannot re-resolve to a blocked address.
     if ips and host and not _looks_like_ip_literal(host):
         cmd += ["--resolve", f"{host}:{port}:{ips[0]}"]
-    if follow_redirects:
+    if follow_redirects and not _looks_like_ip_literal(host):
         cmd.append("-L")
     cmd.append(url)
     ok, raw = run_cmd(cmd, timeout=timeout + 5)
