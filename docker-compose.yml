@@ -117,6 +117,13 @@ services:
     hostname: auvik-${EDGE_SITE_ID}
     restart: unless-stopped
     network_mode: host
+    # Docker generates the container's own /etc/resolv.conf even with
+    # network_mode: host. Pin DNS so the container's resolver doesn't
+    # inherit a transiently-empty host resolv.conf at container-create
+    # time and end up unable to resolve the Auvik SaaS endpoint.
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       - AUVIK_USERNAME=${AUVIK_USERNAME}
       - AUVIK_API_KEY=${AUVIK_API_KEY}
