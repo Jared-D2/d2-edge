@@ -44,6 +44,9 @@ services:
     hostname: syslog-proxy
     restart: unless-stopped
     network_mode: host
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       tailscale:
         condition: service_healthy
@@ -70,6 +73,9 @@ services:
     profiles: ["${DEPLOY_ZABBIX_PROXY:-enabled}"]
     restart: unless-stopped
     network_mode: host
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       tailscale:
         condition: service_healthy
@@ -91,6 +97,9 @@ services:
     profiles: ["${DEPLOY_FREERADIUS_PROXY:-enabled}"]
     restart: unless-stopped
     network_mode: host
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       tailscale:
         condition: service_healthy
@@ -187,6 +196,9 @@ services:
     profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped
     network_mode: host
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       tailscale:
         condition: service_healthy
@@ -219,6 +231,9 @@ services:
     container_name: cert-server
     restart: unless-stopped
     network_mode: host
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     volumes:
       - ./cert-server/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./cert-server/public:/certs:ro
