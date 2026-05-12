@@ -1,0 +1,8 @@
+[Unit]
+Description=Detect and recover from Auvik collector tenant-secret corruption
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/d2-edge/scripts/auvik-watchdog.sh
