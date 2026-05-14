@@ -191,7 +191,7 @@ services:
 
   # ─── Zabbix agent 2 ───────────────────────────────────────────────────────
   zabbix-agent2:
-    image: zabbix/zabbix-agent2:alpine-7.4-latest@sha256:60a07c67c9bf8ca6eeabbed0ab211a8587e2ea55807cdeb92481b2909a9449a0
+    image: zabbix/zabbix-agent2:ubuntu-7.4-latest
     container_name: zabbix-agent2
     profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped
@@ -211,6 +211,7 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/dpkg:/var/lib/dpkg:ro
     environment:
       - ZBX_HOSTNAME=${EDGE_HOSTNAME}
       - ZBX_METADATA=linux d2-edge raspberry-pi
