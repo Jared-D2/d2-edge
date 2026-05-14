@@ -16,7 +16,6 @@ DataSenderFrequency=5
 # the default workers so the extra processes just sit idle — no harm.
 StartPollers=10
 StartSNMPPollers=8
-StartHistoryPollers=2
 StartPreprocessors=10
 StartTrappers=5
 CacheSize=64M
