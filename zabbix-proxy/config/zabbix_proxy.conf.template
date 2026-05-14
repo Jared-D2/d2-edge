@@ -5,3 +5,20 @@ DBName=/var/lib/zabbix/zabbix_proxy.db
 LogType=console
 ProxyConfigFrequency=60
 DataSenderFrequency=5
+
+# ─── Tuning (2026-05-14) ──────────────────────────────────────────────────
+# Default poller counts (StartPollers=5, StartSNMPPollers=1, StartPreprocessors=3)
+# cannot keep up with NIB-site Pi proxies that have 20-50 vps required —
+# preprocessing queue grew unbounded (122k items / 227 MB observed on
+# zbx-nib001-hs) and `zabbix[queue,10m]` sat at 250-400 for >24h.
+# Values below are sized for a Pi 4 with 2-4 GB RAM and headroom for the
+# heaviest site (nib001-hs, ~50 vps polling). Quiet sites stay well under
+# the default workers so the extra processes just sit idle — no harm.
+StartPollers=10
+StartSNMPPollers=8
+StartHistoryPollers=2
+StartPreprocessors=10
+StartTrappers=5
+CacheSize=64M
+HistoryCacheSize=64M
+HistoryIndexCacheSize=16M
