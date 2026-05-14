@@ -52,7 +52,7 @@ echo "  OK"
 # ─── Install dependencies ─────────────────────────────────────────────────
 echo ""
 echo "[3/8] Installing dependencies..."
-apt-get install -y -qq     curl git nano chrony logrotate ca-certificates     gnupg lsb-release apt-transport-https     ufw fail2ban unattended-upgrades     snmp
+apt-get install -y -qq     curl git nano chrony logrotate ca-certificates     gnupg lsb-release apt-transport-https     ufw fail2ban unattended-upgrades     snmp lldpd
 echo "  OK"
 
 # ─── Install Docker ───────────────────────────────────────────────────────
@@ -166,6 +166,18 @@ DROPIN_SRC="${EDGE_DIR}/shared/files/52-d2-auto-reboot.conf"
 if [[ -f "$DROPIN_SRC" ]]; then
     install -m 0644 -o root -g root "$DROPIN_SRC" /etc/apt/apt.conf.d/52-d2-auto-reboot
     echo "  Auto-reboot policy: 02:00 nightly when reboot-required (52-d2-auto-reboot)"
+fi
+
+# Scope LLDP to the physical uplink only. Default lldpd advertises on every
+# interface (wlan0, docker bridges, tailscale0) — none of which connect to a
+# managed switch, so the noise is wasted and confuses topology mappers.
+LLDPD_CONF_SRC="${EDGE_DIR}/shared/files/lldpd-eth0-only.conf"
+if [[ -f "$LLDPD_CONF_SRC" ]]; then
+    mkdir -p /etc/lldpd.d
+    install -m 0644 -o root -g root "$LLDPD_CONF_SRC" /etc/lldpd.d/eth0-only.conf
+    systemctl enable lldpd >/dev/null 2>&1 || true
+    systemctl restart lldpd
+    echo "  LLDP: scoped to eth0 (lldpd-eth0-only.conf)"
 fi
 
 # Provision the Oxidized bastion user (svc_oxidized_proxy, nologin shell,
