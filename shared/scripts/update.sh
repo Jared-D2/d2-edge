@@ -70,7 +70,10 @@ cd "$EDGE_DIR"
 chown admin:admin "$EDGE_DIR"
 chown -R admin:admin "$EDGE_DIR/.git" 2>/dev/null || true
 # Only tracked files matter to `git pull`; list them via the index.
-sudo -u admin git ls-files -z | xargs -0r -I{} chown admin:admin "$EDGE_DIR/{}"
+# `|| true` + 2>/dev/null: tolerate tracked files that are missing on disk
+# (a stray rm) — the pull two lines down will restore them. Without this,
+# xargs' non-zero exit trips `set -euo pipefail` and aborts before pull.
+sudo -u admin git ls-files -z | xargs -0r -I{} chown admin:admin "$EDGE_DIR/{}" 2>/dev/null || true
 sudo -u admin git pull
 # Stamp current commit into .env so d2-agent reports the running version.
 SHA=$(sudo -u admin git -C "$EDGE_DIR" rev-parse HEAD)
