@@ -110,6 +110,17 @@ fi
 if [[ -x "$EDGE_DIR/scripts/setup-oxidized-proxy-user.sh" ]]; then
     bash "$EDGE_DIR/scripts/setup-oxidized-proxy-user.sh"
 fi
+# Auvik watchdog: idempotent install of the systemd timer that watches
+# for tenant-secret corruption (StorageException: No value for
+# com.auvik.npl.agent.tenantInfo.<prefix>.secret) and triggers
+# auvik-recover.sh. The watchdog scripts have shipped in the repo since
+# 2026-05-12 but the systemd unit was a separate manual install; folding
+# the installer in here means every update.sh self-arms the timer.
+# Confirmed gap on nib001-mb-pi01 2026-05-15: repo at latest commit but
+# timer never enabled, leaving the collector silently offline for ~24h.
+if [[ -x "$EDGE_DIR/scripts/install-auvik-watchdog.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-auvik-watchdog.sh"
+fi
 echo "  OK"
 
 echo
