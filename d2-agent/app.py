@@ -952,12 +952,14 @@ async def run_cycle(params: dict) -> dict:
     composed   = _compose_cycle_steps(profiles)
     steps_results: list = []
     failed_or_skipped_orders: set = set()
+    timed_out_during_loop = False
 
     for step in composed:
         # 1. Timeout check
         if time.time() >= deadline:
             steps_results.append(_make_skipped(step, "skipped: cycle_timeout"))
             failed_or_skipped_orders.add(step["step_order"])
+            timed_out_during_loop = True
             continue
 
         # 2. Capability / mode pre-skip
@@ -986,8 +988,11 @@ async def run_cycle(params: dict) -> dict:
             failed_or_skipped_orders.add(step["step_order"])
 
     completed_at = time.time()
-    timed_out = completed_at >= deadline and len(
-        [s for s in steps_results if s["status"] != "skipped"]) < len(composed)
+    # timed_out is true only when the in-loop deadline check actually fired.
+    # Reading "completed_at >= deadline" alone is misleading because the
+    # deadline can pass between the last successful step's completion and
+    # the post-loop time.time() call, in cycles that legitimately finished.
+    timed_out = timed_out_during_loop
     core_failed = any(
         s["status"] == "failed" and s["step_order"] < 100
         for s in steps_results
