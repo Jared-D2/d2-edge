@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.request
 import uuid
+import shutil
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Optional
@@ -341,6 +342,193 @@ def run_cmd(cmd: list, timeout: int = 60) -> tuple[bool, str]:
         if _is_spawn_exhaustion(e):
             raise SpawnFailureError(f"{type(e).__name__}: {e}") from e
         return False, str(e)
+
+
+WIFI_IFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
+
+
+def validate_wifi_interface(interface: str) -> str:
+    if not isinstance(interface, str) or not interface.strip():
+        raise HTTPException(status_code=400, detail="Invalid Wi-Fi interface")
+    interface = interface.strip()
+    if not WIFI_IFACE_RE.match(interface) or interface.startswith("-"):
+        raise HTTPException(status_code=400, detail="Invalid Wi-Fi interface")
+    return interface
+
+
+def validate_ssid(ssid: str) -> str:
+    ssid = (ssid or "").strip()
+    if not ssid or len(ssid.encode("utf-8")) > 32:
+        raise HTTPException(status_code=400, detail="Invalid SSID")
+    return ssid
+
+
+def _split_nmcli_terse(line: str) -> list:
+    parts = []
+    buf = []
+    escaped = False
+    for ch in line:
+        if escaped:
+            buf.append(ch)
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == ":":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return parts
+
+
+def _signal_pct_to_rssi(signal_pct):
+    try:
+        pct = max(0, min(100, int(signal_pct)))
+    except Exception:
+        return None
+    return int((pct / 2) - 100)
+
+
+def parse_nmcli_wifi_scan(raw: str) -> list:
+    aps = []
+    for line in (raw or "").splitlines():
+        if not line.strip():
+            continue
+        parts = _split_nmcli_terse(line)
+        if len(parts) < 5:
+            continue
+        ssid, bssid, channel, signal_pct, security = parts[:5]
+        try:
+            channel_val = int(channel) if channel else None
+        except ValueError:
+            channel_val = None
+        try:
+            signal_val = int(signal_pct) if signal_pct else None
+        except ValueError:
+            signal_val = None
+        aps.append({
+            "ssid": ssid,
+            "bssid": bssid,
+            "channel": channel_val,
+            "signal_pct": signal_val,
+            "rssi": _signal_pct_to_rssi(signal_val),
+            "security": security,
+        })
+    return aps
+
+
+def parse_iw_wifi_scan(raw: str) -> list:
+    aps = []
+    current = None
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if line.startswith("BSS "):
+            if current:
+                aps.append(current)
+            current = {"bssid": line.split()[1].split("(")[0]}
+        elif current is not None and line.startswith("SSID:"):
+            current["ssid"] = line.split("SSID:", 1)[1].strip()
+        elif current is not None and line.startswith("signal:"):
+            m = re.search(r"(-?\d+(?:\.\d+)?)", line)
+            if m:
+                current["rssi"] = float(m.group(1))
+        elif current is not None and line.startswith("DS Parameter set: channel"):
+            m = re.search(r"channel\s+(\d+)", line)
+            if m:
+                current["channel"] = int(m.group(1))
+    if current:
+        aps.append(current)
+    return aps
+
+
+def run_ap_scan(interface: str = "wlan0") -> dict:
+    interface = validate_wifi_interface(interface)
+    if shutil.which("nmcli"):
+        ok, raw = run_cmd(
+            ["nmcli", "-t", "-f", "SSID,BSSID,CHAN,SIGNAL,SECURITY",
+             "dev", "wifi", "list", "ifname", interface, "--rescan", "yes"],
+            timeout=30,
+        )
+        if not ok:
+            return {"success": False, "interface": interface, "aps": [], "error": raw}
+        aps = parse_nmcli_wifi_scan(raw)
+    elif shutil.which("iw"):
+        ok, raw = run_cmd(["iw", "dev", interface, "scan"], timeout=30)
+        if not ok:
+            return {"success": False, "interface": interface, "aps": [], "error": raw}
+        aps = parse_iw_wifi_scan(raw)
+    else:
+        return {
+            "success": False,
+            "interface": interface,
+            "aps": [],
+            "error": "Neither nmcli nor iw is installed",
+        }
+    return {
+        "success": True,
+        "interface": interface,
+        "aps": aps,
+        "timestamp": time.time(),
+    }
+
+
+def run_ssid_check(ssid: str, interface: str = "wlan0") -> dict:
+    ssid = validate_ssid(ssid)
+    scan = run_ap_scan(interface)
+    matches = [ap for ap in scan.get("aps", []) if ap.get("ssid") == ssid]
+    channels = sorted({ap.get("channel") for ap in matches if ap.get("channel") is not None})
+    strongest = None
+    for ap in matches:
+        rssi = ap.get("rssi")
+        if isinstance(rssi, (int, float)):
+            strongest = rssi if strongest is None else max(strongest, rssi)
+    visible = bool(matches)
+    return {
+        "success": bool(scan.get("success")) and visible,
+        "interface": scan.get("interface", interface),
+        "ssid": ssid,
+        "visible": visible,
+        "bssid_count": len(matches),
+        "strongest_rssi": strongest,
+        "channels": channels,
+        "bssids": [ap.get("bssid") for ap in matches if ap.get("bssid")],
+        "error": None if visible else scan.get("error") or "SSID not visible",
+        "timestamp": time.time(),
+    }
+
+
+def run_association_test(ssid: str, interface: str = "wlan0", timeout: int = 20,
+                         password: str = "") -> dict:
+    ssid = validate_ssid(ssid)
+    interface = validate_wifi_interface(interface)
+    timeout = max(5, min(int(timeout), 120))
+    if not shutil.which("nmcli"):
+        return {
+            "success": False,
+            "interface": interface,
+            "ssid": ssid,
+            "error": "nmcli is required for association_test",
+            "timestamp": time.time(),
+        }
+    cmd = ["nmcli", "--wait", str(timeout), "dev", "wifi", "connect", ssid, "ifname", interface]
+    if password:
+        cmd.extend(["password", password])
+    started = time.time()
+    ok, raw = run_cmd(cmd, timeout=timeout + 5)
+    total_ms = round((time.time() - started) * 1000, 1)
+    check = run_ssid_check(ssid, interface)
+    return {
+        "success": bool(ok),
+        "interface": interface,
+        "ssid": ssid,
+        "total_ms": total_ms,
+        "assoc_ms": total_ms if ok else None,
+        "bssid": (check.get("bssids") or [None])[0],
+        "rssi": check.get("strongest_rssi"),
+        "error": None if ok else raw[:500],
+        "timestamp": time.time(),
+    }
 
 
 def get_local_ip() -> str:
@@ -1608,6 +1796,20 @@ async def handle_command(ws, raw: str):
         elif cmd == "dhcp_test":
             iface = params.get("interface", "eth0")
             result = await loop.run_in_executor(None, run_dhcp_test, iface)
+        elif cmd == "ap_scan":
+            interface = validate_wifi_interface(params.get("interface", "wlan0"))
+            result = await loop.run_in_executor(None, run_ap_scan, interface)
+        elif cmd == "ssid_check":
+            ssid = validate_ssid(params.get("ssid", ""))
+            interface = validate_wifi_interface(params.get("interface", "wlan0"))
+            result = await loop.run_in_executor(None, run_ssid_check, ssid, interface)
+        elif cmd == "association_test":
+            ssid = validate_ssid(params.get("ssid", ""))
+            interface = validate_wifi_interface(params.get("interface", "wlan0"))
+            timeout = int(params.get("timeout", 20))
+            password = params.get("password", "")
+            result = await loop.run_in_executor(
+                None, run_association_test, ssid, interface, timeout, password)
         elif cmd == "config_update":
             # Atomic replace: build a new MonitorConfig and swap the module
             # reference. Read by the monitor loops as a single pointer deref,
