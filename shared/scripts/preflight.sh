@@ -66,6 +66,19 @@ if [[ -f "$ENV_FILE" ]]; then
     declare -A heal_defaults=(
         [SENSOR_MODE]=passive
         [NETFLOW_COLLECTOR_HOST]=192.168.166.8
+        # Service deployment toggles — discoverability heal. NOT in
+        # required[] below: operators may legitimately set these to
+        # 'disabled', and the compose `${VAR:-enabled}` fallback means
+        # absence is functionally equivalent to 'enabled'. Healing them
+        # in surfaces the toggle keys in every Pi's .env so the on/off
+        # switches are visible alongside the rest of the config.
+        [DEPLOY_AUVIK]=enabled
+        [DEPLOY_D2_AGENT]=enabled
+        [DEPLOY_FREERADIUS_PROXY]=enabled
+        [DEPLOY_NETFLOW_PROXY]=enabled
+        [DEPLOY_SYSLOG_PROXY]=enabled
+        [DEPLOY_ZABBIX_AGENT2]=enabled
+        [DEPLOY_ZABBIX_PROXY]=enabled
     )
     # DOCKER_GID default is host-derived, not a fleet-wide literal.
     host_docker_gid=$(getent group docker 2>/dev/null | cut -d: -f3 || true)
