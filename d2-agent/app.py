@@ -434,15 +434,19 @@ def parse_nmcli_wifi_scan(raw: str) -> list:
     return aps
 
 
+_IW_BSS_HEADER_RE = re.compile(r"^BSS\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\b")
+
+
 def parse_iw_wifi_scan(raw: str) -> list:
     aps = []
     current = None
     for line in (raw or "").splitlines():
         line = line.strip()
-        if line.startswith("BSS "):
+        header = _IW_BSS_HEADER_RE.match(line)
+        if header:
             if current:
                 aps.append(current)
-            current = {"bssid": line.split()[1].split("(")[0]}
+            current = {"bssid": header.group(1)}
         elif current is not None and line.startswith("SSID:"):
             current["ssid"] = line.split("SSID:", 1)[1].strip()
         elif current is not None and line.startswith("signal:"):

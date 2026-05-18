@@ -22,6 +22,53 @@ def test_validate_wifi_interface_rejects_shell_shapes(bad):
         app.validate_wifi_interface(bad)
 
 
+IW_SCAN_TWO_APS = """BSS d0:db:b7:9a:5f:03(on wlan0)
+\tTSF: 0 usec (0d, 00:00:00)
+\tfreq: 2452.0
+\tsignal: -52.00 dBm
+\tSSID: NetComm 2918
+\tDS Parameter set: channel 9
+\tRSN:\t * Version: 1
+\t\t * Group cipher: CCMP
+\tBSS Load:
+\t\t * station count: 0
+\t\t * channel utilisation: 12/255
+\tBSS Membership Selectors:
+\t\t * SAE Hash-to-Element only
+\tHT capabilities:
+\t\tCapabilities: 0x9bc
+BSS 70:4c:a5:dc:76:60(on wlan0) -- associated
+\tTSF: 0 usec
+\tfreq: 5825.0
+\tsignal: -60.00 dBm
+\tSSID: D2-CORP
+\tDS Parameter set: channel 165
+\tBSS Load:
+\t\t * station count: 0
+"""
+
+
+def test_parse_iw_wifi_scan_ignores_bss_subsections():
+    aps = app.parse_iw_wifi_scan(IW_SCAN_TWO_APS)
+    assert [a["bssid"] for a in aps] == [
+        "d0:db:b7:9a:5f:03",
+        "70:4c:a5:dc:76:60",
+    ]
+    assert aps[0]["ssid"] == "NetComm 2918"
+    assert aps[0]["channel"] == 9
+    assert aps[0]["rssi"] == -52.0
+    assert aps[1]["ssid"] == "D2-CORP"
+    assert aps[1]["channel"] == 165
+    assert aps[1]["rssi"] == -60.0
+
+
+def test_parse_iw_wifi_scan_handles_uppercase_mac():
+    raw = "BSS AA:BB:CC:DD:EE:FF(on wlan0)\n\tSSID: foo\n\tBSS Load:\n\t\t * station count: 1\n"
+    aps = app.parse_iw_wifi_scan(raw)
+    assert len(aps) == 1
+    assert aps[0]["bssid"] == "AA:BB:CC:DD:EE:FF"
+
+
 def test_parse_nmcli_wifi_scan_handles_escaped_colons():
     raw = r"My\:SSID:AA\:BB\:CC\:DD\:EE\:FF:6:72:WPA2"
     aps = app.parse_nmcli_wifi_scan(raw)
