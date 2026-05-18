@@ -5,7 +5,8 @@
 # update.sh / deploy-all.sh proceed. Fails loud and early — never silently.
 # Exits 0 on success, 1 on any failure with one error per line on stderr.
 #
-# Idempotent + side-effect-free. Safe to run any time.
+# Idempotent: appends known-default keys to .env when missing (heal phase
+# below), otherwise read-only. Safe to run any time.
 
 set -euo pipefail
 
@@ -49,6 +50,34 @@ if [[ -f "$ENV_FILE" ]]; then
             echo "  preflight: WARN .env has same-value duplicate '$dupkey' (auto-fixed by update.sh)" >&2
         fi
     done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | cut -d= -f1 | sort | uniq -d)
+fi
+
+# --- 2.5. Heal known defaults before the required-key check -------------
+# Co-located with the check so a new required key with a known default is
+# a single edit: add to both `heal_defaults` here and `required` below.
+# Pre-2026-05-18 these heals lived in update.sh, which created a chicken-
+# and-egg — `git pull` brought a new preflight.sh enforcing a new required
+# key, but the old update.sh on disk hadn't yet loaded the matching heal
+# block, so the first `sudo bash update.sh` failed preflight and only the
+# second succeeded (because the first attempt's pull had refreshed
+# update.sh). Healing here means the new check and its default land in the
+# same commit and arrive together via one git pull.
+if [[ -f "$ENV_FILE" ]]; then
+    declare -A heal_defaults=(
+        [SENSOR_MODE]=passive
+        [NETFLOW_COLLECTOR_HOST]=192.168.166.8
+    )
+    # DOCKER_GID default is host-derived, not a fleet-wide literal.
+    host_docker_gid=$(getent group docker 2>/dev/null | cut -d: -f3 || true)
+    [[ -n "$host_docker_gid" ]] && heal_defaults[DOCKER_GID]="$host_docker_gid"
+
+    for k in "${!heal_defaults[@]}"; do
+        if ! grep -q "^${k}=" "$ENV_FILE"; then
+            if echo "${k}=${heal_defaults[$k]}" >> "$ENV_FILE" 2>/dev/null; then
+                echo "  preflight: healed .env — appended ${k}=${heal_defaults[$k]}" >&2
+            fi
+        fi
+    done
 fi
 
 # --- 3. Required keys present + non-empty -------------------------------

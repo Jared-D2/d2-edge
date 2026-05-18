@@ -19,35 +19,6 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Heal .env if DOCKER_GID is missing — older bootstraps didn't persist it,
-# and `docker compose` interpolates ${DOCKER_GID} from .env at graph-parse
-# time. A missing key leaves zabbix-agent2's group_add unresolved and
-# stops the start phase mid-recreate (containers stuck in 'Created').
-# This must run BEFORE preflight at [2/6] so the new required-key check
-# doesn't reject a legacy .env that we're about to fix.
-if [[ -f "$EDGE_DIR/.env" ]] && ! grep -q "^DOCKER_GID=" "$EDGE_DIR/.env"; then
-    echo "DOCKER_GID=${DOCKER_GID}" >> "$EDGE_DIR/.env"
-    echo "Healed .env: appended DOCKER_GID=${DOCKER_GID} (legacy bootstrap)"
-fi
-
-# Heal .env if NETFLOW_COLLECTOR_HOST is missing — netflow-proxy templating
-# (2026-05-18) introduced this key. Legacy Pis (d2001-nw-pi01 had netflow-
-# proxy hand-installed with a hardcoded IP) won't have it; render-configs.sh
-# would fail validate_rendered on the unresolved ${NETFLOW_COLLECTOR_HOST}
-# placeholder. Fleet-wide default is 192.168.166.8 (central goflow2).
-if [[ -f "$EDGE_DIR/.env" ]] && ! grep -q "^NETFLOW_COLLECTOR_HOST=" "$EDGE_DIR/.env"; then
-    echo "NETFLOW_COLLECTOR_HOST=192.168.166.8" >> "$EDGE_DIR/.env"
-    echo "Healed .env: appended NETFLOW_COLLECTOR_HOST=192.168.166.8 (legacy bootstrap)"
-fi
-
-# Heal .env if SENSOR_MODE is missing — preflight enforces presence
-# (added 2026-05-18 alongside d2-agent sensor_mode work) but doesn't
-# self-heal. Default 'passive' is safe on any Pi.
-if [[ -f "$EDGE_DIR/.env" ]] && ! grep -q "^SENSOR_MODE=" "$EDGE_DIR/.env"; then
-    echo "SENSOR_MODE=passive" >> "$EDGE_DIR/.env"
-    echo "Healed .env: appended SENSOR_MODE=passive (legacy bootstrap)"
-fi
-
 # Heal .env duplicate KEY= lines. preflight.sh fails loud on conflicting
 # duplicates; here we silently dedup same-value duplicates (paste
 # accidents during onboarding) so update.sh stays self-healing on legacy
