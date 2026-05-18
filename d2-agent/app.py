@@ -1006,6 +1006,45 @@ async def run_cycle(params: dict) -> dict:
     }
 
 
+async def _run_cycle_and_send(ws, params: dict) -> None:
+    """Background task: run a cycle and ship the cycle_result envelope."""
+    global _cycle_in_flight
+    try:
+        envelope = await run_cycle(params)
+        await ws.send(json.dumps(envelope))
+    except Exception as e:
+        log.warning("run_cycle task failed: %s", e, exc_info=True)
+        # Send a structured failure envelope so the controller doesn't time out.
+        try:
+            await ws.send(json.dumps({
+                "type": "cycle_result",
+                "agent_id": AGENT_ID,
+                "tenant_id": TENANT_ID,
+                "cycle_id": params.get("cycle_id", ""),
+                "started_at": time.time(),
+                "completed_at": time.time(),
+                "status": "failed",
+                "steps": [{
+                    "step_order": 0,
+                    "layer": "runner",
+                    "command": "run_cycle",
+                    "step_name": "runner/error",
+                    "status": "failed",
+                    "started_at": time.time(),
+                    "completed_at": time.time(),
+                    "duration_ms": 0,
+                    "target": None,
+                    "result_summary": {},
+                    "error": f"{type(e).__name__}: {e}",
+                    "depends_on": [],
+                }],
+            }))
+        except Exception:
+            pass
+    finally:
+        _cycle_in_flight = False
+
+
 def run_speedtest() -> dict:
     ok, raw = run_cmd(["speedtest", "--format=json", "--accept-license", "--accept-gdpr"], timeout=120)
     if not ok:
@@ -2184,6 +2223,16 @@ async def handle_command(ws, raw: str):
                 password = params.get("password", "")
                 result = await loop.run_in_executor(
                     None, run_association_test, ssid, interface, timeout, password)
+        elif cmd == "run_cycle":
+            global _cycle_in_flight
+            if _cycle_in_flight:
+                result = {"error": "cycle_in_flight"}
+            else:
+                # Spawn the cycle as a background task and return immediately.
+                # Do NOT await — that would block the WS read loop for 3-60s.
+                _cycle_in_flight = True
+                asyncio.create_task(_run_cycle_and_send(ws, params))
+                return  # cycle_result follows asynchronously from the task.
         elif cmd == "config_update":
             # Atomic replace: build a new MonitorConfig and swap the module
             # reference. Read by the monitor loops as a single pointer deref,

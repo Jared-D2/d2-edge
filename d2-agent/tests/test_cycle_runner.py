@@ -1,6 +1,7 @@
 """Tests for the UXI multi-step cycle runner.
 Slice B1+B2 — UXI Cycle Runner (2026-05-18).
 """
+import json
 import os
 import sys
 import time
@@ -382,3 +383,84 @@ async def test_run_cycle_result_envelope_shape(monkeypatch):
     assert result["status"] in ("completed", "failed", "timed_out")
     assert isinstance(result["steps"], list)
     assert len(result["steps"]) == 8  # core only
+
+
+class _FakeWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, msg):
+        self.sent.append(msg)
+
+
+@pytest.mark.asyncio
+async def test_handle_command_run_cycle_spawns_task_and_sends_cycle_result(monkeypatch):
+    """run_cycle command returns immediately; cycle_result follows asynchronously."""
+    import asyncio as _asyncio
+    monkeypatch.setattr(app, "ALLOWED_COMMANDS", None)
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: None)
+    monkeypatch.setattr(app, "_build_capabilities",
+                        lambda: {"rf_scan": False, "rf_tool": None,
+                                 "wifi_iface": None, "association_test": False,
+                                 "last_rf_error": None})
+    monkeypatch.setattr(app, "get_default_gateway", lambda: "10.0.0.1")
+    monkeypatch.setattr(app, "get_dns_servers", lambda: ["8.8.8.8", "1.1.1.1"])
+    monkeypatch.setattr(app, "run_ping",
+                        lambda target, count=10, size=0, df=False, interval=1.0:
+                        {"success": True, "target": target, "packet_loss_pct": 0.0})
+    monkeypatch.setattr(app, "run_dns",
+                        lambda target="google.com", server="", record_type="A":
+                        {"success": True, "target": target, "server": server, "answers": ["1.2.3.4"]})
+    monkeypatch.setattr(app, "_run_dhcp_test_helper",
+                        lambda iface: {"success": True, "interface": iface,
+                                       "ip_address": "10.0.0.50", "lease_seconds": 3600})
+
+    # Make sure flag starts clean.
+    app._cycle_in_flight = False
+
+    ws = _FakeWS()
+    payload = json.dumps({
+        "command": "run_cycle",
+        "job_id": "job-cycle-1",
+        "params": {"cycle_id": "cyc-1", "expected_ssid": None, "profiles": []},
+    })
+    await app.handle_command(ws, payload)
+
+    # Yield repeatedly so the background task can run + send.
+    for _ in range(50):
+        if ws.sent:
+            break
+        await _asyncio.sleep(0.05)
+
+    assert len(ws.sent) >= 1
+    sent = json.loads(ws.sent[0])
+    assert sent.get("type") == "cycle_result"
+    assert sent.get("cycle_id") == "cyc-1"
+    assert "steps" in sent
+    # Flag must be cleared after completion.
+    # Allow one more event-loop tick for the finally block.
+    await _asyncio.sleep(0.05)
+    assert app._cycle_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_handle_command_run_cycle_refuses_when_in_flight(monkeypatch):
+    """Concurrent run_cycle while one is in flight → immediate refusal."""
+    monkeypatch.setattr(app, "ALLOWED_COMMANDS", None)
+    app._cycle_in_flight = True
+    try:
+        ws = _FakeWS()
+        payload = json.dumps({
+            "command": "run_cycle",
+            "job_id": "job-cycle-busy",
+            "params": {"cycle_id": "cyc-busy", "profiles": []},
+        })
+        await app.handle_command(ws, payload)
+        # Refusal is sent as a regular `result` envelope (not cycle_result).
+        assert len(ws.sent) == 1
+        sent = json.loads(ws.sent[0])
+        assert sent.get("type") == "result"
+        assert "in_flight" in sent["result"]["error"]
+    finally:
+        app._cycle_in_flight = False
