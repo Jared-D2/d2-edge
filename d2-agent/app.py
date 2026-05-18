@@ -661,6 +661,27 @@ def get_tailscale_ip() -> str:
         return ''
 
 
+def _build_capabilities() -> dict:
+    iface = detect_wifi_iface()
+    nmcli = shutil.which("nmcli") is not None
+    iw = shutil.which("iw") is not None
+    if nmcli:
+        rf_tool = "nmcli"
+    elif iw:
+        rf_tool = "iw"
+    else:
+        rf_tool = None
+    rf_scan = bool(iface and rf_tool)
+    association_test = rf_scan and SENSOR_MODE in ("active", "lab")
+    return {
+        "rf_scan": rf_scan,
+        "rf_tool": rf_tool,
+        "wifi_iface": iface,
+        "association_test": association_test,
+        "last_rf_error": _last_rf_error,
+    }
+
+
 def system_info() -> dict:
     ok, uptime = run_cmd(["cat", "/proc/uptime"])
     uptime_seconds = float(uptime.split()[0]) if ok else None
@@ -680,6 +701,8 @@ def system_info() -> dict:
         "git_sha": GIT_SHA,
         "version": GIT_SHA[:7] if GIT_SHA != "unknown" else "unknown",
         "uptime_seconds": uptime_seconds,
+        "sensor_mode": SENSOR_MODE,
+        "capabilities": _build_capabilities(),
         "timestamp": time.time(),
     }
 

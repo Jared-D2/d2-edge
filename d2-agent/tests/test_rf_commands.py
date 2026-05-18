@@ -171,3 +171,71 @@ def test_last_rf_error_set_on_ssid_check_failure(monkeypatch):
     assert result["visible"] is False
     assert app._last_rf_error is not None
     assert "scan" in app._last_rf_error.lower() or "ssid" in app._last_rf_error.lower()
+
+
+def test_system_info_reports_sensor_mode_and_capabilities(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app.shutil, "which",
+                        lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
+    app._last_rf_error = None
+    info = app.system_info()
+    assert info["sensor_mode"] == "passive"
+    caps = info["capabilities"]
+    assert caps["rf_scan"] is True
+    assert caps["rf_tool"] == "nmcli"
+    assert caps["wifi_iface"] == "wlan0"
+    assert caps["association_test"] is False  # passive
+    assert caps["last_rf_error"] is None
+
+
+def test_system_info_reports_no_rf_when_no_wireless_iface(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: None)
+    monkeypatch.setattr(app.shutil, "which",
+                        lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
+    info = app.system_info()
+    caps = info["capabilities"]
+    assert caps["rf_scan"] is False
+    assert caps["rf_tool"] == "nmcli"  # tool is installed but no iface
+    assert caps["wifi_iface"] is None
+    assert caps["association_test"] is False
+
+
+def test_system_info_reports_association_test_when_active(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "active")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app.shutil, "which",
+                        lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
+    info = app.system_info()
+    assert info["capabilities"]["association_test"] is True
+
+
+def test_system_info_prefers_nmcli_over_iw(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    def fake_which(name):
+        return "/usr/bin/" + name if name in ("nmcli", "iw") else None
+    monkeypatch.setattr(app.shutil, "which", fake_which)
+    info = app.system_info()
+    assert info["capabilities"]["rf_tool"] == "nmcli"
+
+
+def test_system_info_uses_iw_when_only_iw_available(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app.shutil, "which",
+                        lambda name: "/usr/sbin/iw" if name == "iw" else None)
+    info = app.system_info()
+    assert info["capabilities"]["rf_tool"] == "iw"
+    assert info["capabilities"]["rf_scan"] is True
+
+
+def test_system_info_reports_no_rf_tool_when_neither_installed(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app.shutil, "which", lambda name: None)
+    info = app.system_info()
+    caps = info["capabilities"]
+    assert caps["rf_tool"] is None
+    assert caps["rf_scan"] is False  # no tool, even though iface exists
