@@ -3,7 +3,7 @@ FROM python:3.12-slim
 # Refresh base distro packages first to pick up Debian security updates
 # (openssl, libssl3t64, libgdk-pixbuf*, libtiff6, etc.)
 RUN apt-get update && apt-get -y upgrade && apt-get install -y \
-    iperf3 iputils-ping curl traceroute mtr gnupg lsb-release psmisc procps nmap iproute2 \
+    iperf3 iputils-ping curl traceroute mtr gnupg lsb-release psmisc procps nmap iproute2 iw \
     && rm -rf /var/lib/apt/lists/*
 
 # Install ca-certificates + D2 internal root CA

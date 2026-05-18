@@ -159,6 +159,11 @@ services:
     profiles: ["${DEPLOY_D2_AGENT:-enabled}"]
     restart: unless-stopped
     network_mode: host
+    # NET_ADMIN is required for `iw dev wlan0 scan` (nl80211 netlink). Without
+    # it, scans fail with EPERM and rf_scan capability reports false even
+    # though wlan0 is detected. NET_RAW is not needed for iw-based scanning.
+    cap_add:
+      - NET_ADMIN
     # Bound the container's PID/thread budget so a leak (e.g. accumulated
     # mtr/iperf children under thread-spawn pressure) saturates the
     # container's quota and fails its own probes cleanly, instead of
