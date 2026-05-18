@@ -177,7 +177,7 @@ export COMPOSE_PROFILES=enabled
 # Plain `up -d` on tailscale still recreates it if docker-compose.yml
 # itself changed, which is the only case where a restart is warranted.
 docker compose up -d --force-recreate \
-    auvik cert-server d2-agent freeradius-proxy \
+    auvik cert-server d2-agent freeradius-proxy netflow-proxy \
     syslog-proxy zabbix-agent2 zabbix-proxy
 docker compose up -d tailscale
 echo "  OK"
