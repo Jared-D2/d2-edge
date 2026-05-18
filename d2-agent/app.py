@@ -716,6 +716,62 @@ def system_info() -> dict:
     }
 
 
+# --- UXI Cycle Runner ---------------------------------------------------
+# Slice B1+B2 — multi-step ordered cycle. Core sequence is a constant;
+# app profiles append after step 80.
+
+CORE_CYCLE_STEPS = [
+    {"step_order": 10, "layer": "rf",              "command": "ap_scan",          "depends_on": []},
+    {"step_order": 20, "layer": "rf",              "command": "ssid_check",       "depends_on": [10]},
+    {"step_order": 30, "layer": "association",     "command": "association_test", "depends_on": [20]},
+    {"step_order": 40, "layer": "ip_stack",        "command": "dhcp_test",        "depends_on": [30]},
+    {"step_order": 50, "layer": "connectivity",    "command": "gateway_ping",     "depends_on": [40]},
+    {"step_order": 60, "layer": "name_resolution", "command": "dns_primary",      "depends_on": [50]},
+    {"step_order": 70, "layer": "name_resolution", "command": "dns_secondary",    "depends_on": [50]},
+    {"step_order": 80, "layer": "connectivity",    "command": "internet_ping",    "depends_on": [50]},
+]
+
+
+def _compose_cycle_steps(profiles: list) -> list:
+    """Return core steps + each profile's steps with assigned step_orders.
+
+    Profile i (0-indexed) gets step_orders starting at 100 * (i + 1). Steps
+    within a profile are numbered sequentially from that base. App-layer
+    steps default to depends_on=[80] (need internet)."""
+    composed = list(CORE_CYCLE_STEPS)
+    for profile_idx, profile in enumerate(profiles):
+        base = 100 * (profile_idx + 1)
+        for step_idx, step in enumerate(profile.get("steps", [])):
+            composed.append({
+                "step_order": base + step_idx,
+                "layer": "application",
+                "command": step.get("type", ""),
+                "depends_on": step.get("depends_on", [80]),
+                "_profile_id": profile.get("id"),
+                "_step_args": step,
+            })
+    return composed
+
+
+def _make_skipped(step: dict, reason: str) -> dict:
+    """Build a 'skipped' step-result envelope."""
+    now = time.time()
+    return {
+        "step_order": step["step_order"],
+        "layer": step["layer"],
+        "command": step["command"],
+        "step_name": f"{step['layer']}/{step['command']}",
+        "status": "skipped",
+        "started_at": now,
+        "completed_at": now,
+        "duration_ms": 0,
+        "target": None,
+        "result_summary": {},
+        "error": reason,
+        "depends_on": step.get("depends_on", []),
+    }
+
+
 def run_speedtest() -> dict:
     ok, raw = run_cmd(["speedtest", "--format=json", "--accept-license", "--accept-gdpr"], timeout=120)
     if not ok:
