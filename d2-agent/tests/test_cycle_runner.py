@@ -99,3 +99,110 @@ def test_make_skipped_envelope():
     assert result["duration_ms"] == 0
     assert "started_at" in result
     assert "completed_at" in result
+
+
+@pytest.mark.asyncio
+async def test_run_step_ap_scan_uses_capability_iface(monkeypatch):
+    """ap_scan step calls run_ap_scan with the detected wifi_iface."""
+    captured = {}
+    def fake_ap_scan(interface="wlan0"):
+        captured["interface"] = interface
+        return {"success": True, "interface": interface, "aps": [], "timestamp": 1.0}
+    monkeypatch.setattr(app, "run_ap_scan", fake_ap_scan)
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlp2s0")
+
+    step = {"step_order": 10, "layer": "rf", "command": "ap_scan", "depends_on": []}
+    result = await app._run_step(step, expected_ssid=None)
+    assert captured["interface"] == "wlp2s0"
+    assert result["status"] == "passed"
+    assert result["target"] == "wlp2s0"
+
+
+@pytest.mark.asyncio
+async def test_run_step_dns_primary_uses_first_resolver(monkeypatch):
+    """dns_primary uses the first DNS server from /etc/resolv.conf."""
+    captured = {}
+    def fake_dns(target="google.com", server="", record_type="A"):
+        captured["server"] = server
+        return {"success": True, "target": target, "server": server,
+                "answers": ["1.2.3.4"], "rtt_ms": 12}
+    monkeypatch.setattr(app, "run_dns", fake_dns)
+    monkeypatch.setattr(app, "get_dns_servers", lambda: ["8.8.8.8", "1.1.1.1"])
+
+    step = {"step_order": 60, "layer": "name_resolution",
+            "command": "dns_primary", "depends_on": [50]}
+    result = await app._run_step(step, expected_ssid=None)
+    assert captured["server"] == "8.8.8.8"
+    assert result["status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_run_step_dns_secondary_skips_when_no_secondary(monkeypatch):
+    """No secondary resolver configured -> step skips itself."""
+    monkeypatch.setattr(app, "get_dns_servers", lambda: ["8.8.8.8"])  # only one
+
+    step = {"step_order": 70, "layer": "name_resolution",
+            "command": "dns_secondary", "depends_on": [50]}
+    result = await app._run_step(step, expected_ssid=None)
+    assert result["status"] == "skipped"
+    assert "secondary" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_step_internet_ping_two_targets(monkeypatch):
+    """internet_ping pings 1.1.1.1 then 8.8.8.8, passes if either passes."""
+    called = []
+    def fake_ping(target, count=10, size=0, df=False, interval=1.0):
+        called.append(target)
+        if target == "1.1.1.1":
+            return {"success": False, "target": target, "packet_loss_pct": 100.0}
+        return {"success": True, "target": target, "packet_loss_pct": 0.0,
+                "rtt_avg_ms": 15.2}
+    monkeypatch.setattr(app, "run_ping", fake_ping)
+
+    step = {"step_order": 80, "layer": "connectivity",
+            "command": "internet_ping", "depends_on": [50]}
+    result = await app._run_step(step, expected_ssid=None)
+    assert called == ["1.1.1.1", "8.8.8.8"]
+    assert result["status"] == "passed"  # 8.8.8.8 passed -> overall pass
+    assert "loss_pct_min" in result["result_summary"]
+
+
+@pytest.mark.asyncio
+async def test_run_step_app_http_uses_step_args(monkeypatch):
+    """App-profile http step calls run_http_test with the profile-supplied url."""
+    captured = {}
+    def fake_http(url, follow_redirects=True, timeout=15):
+        captured["url"] = url
+        return {"success": True, "url": url, "status_code": 200, "total_ms": 220}
+    monkeypatch.setattr(app, "run_http_test", fake_http)
+
+    step = {"step_order": 100, "layer": "application", "command": "http",
+            "depends_on": [80],
+            "_step_args": {"type": "http", "url": "https://teams.microsoft.com"},
+            "_profile_id": "microsoft_teams"}
+    result = await app._run_step(step, expected_ssid=None)
+    assert captured["url"] == "https://teams.microsoft.com"
+    assert result["status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_run_step_unknown_command_fails(monkeypatch):
+    """Unknown command -> step result with status=failed and clear error."""
+    step = {"step_order": 999, "layer": "application", "command": "telepathy",
+            "depends_on": [80], "_step_args": {}}
+    result = await app._run_step(step, expected_ssid=None)
+    assert result["status"] == "failed"
+    assert "telepathy" in result["error"].lower() or "unknown" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_step_records_duration(monkeypatch):
+    """duration_ms is populated."""
+    monkeypatch.setattr(app, "run_ap_scan",
+                        lambda interface="wlan0": {"success": True, "interface": interface, "aps": []})
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    step = {"step_order": 10, "layer": "rf", "command": "ap_scan", "depends_on": []}
+    result = await app._run_step(step, expected_ssid=None)
+    assert isinstance(result["duration_ms"], (int, float))
+    assert result["duration_ms"] >= 0

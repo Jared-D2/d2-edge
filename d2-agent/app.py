@@ -772,6 +772,153 @@ def _make_skipped(step: dict, reason: str) -> dict:
     }
 
 
+async def _run_step(step: dict, expected_ssid: str | None) -> dict:
+    """Dispatch one step to the underlying agent helper and wrap the result."""
+    loop = asyncio.get_running_loop()
+    started_at = time.time()
+    cmd = step["command"]
+    args = step.get("_step_args", {})
+    target = None
+    result_summary = {}
+    status = "failed"
+    error = None
+
+    try:
+        if cmd == "ap_scan":
+            iface = detect_wifi_iface() or "wlan0"
+            target = iface
+            raw = await loop.run_in_executor(None, run_ap_scan, iface)
+            result_summary = raw
+            status = "passed" if raw.get("success") else "failed"
+            error = None if status == "passed" else raw.get("error")
+        elif cmd == "ssid_check":
+            if not expected_ssid:
+                return _make_skipped(step, "skipped: no_expected_ssid")
+            iface = detect_wifi_iface() or "wlan0"
+            target = expected_ssid
+            raw = await loop.run_in_executor(None, run_ssid_check, expected_ssid, iface)
+            result_summary = raw
+            status = "passed" if raw.get("visible") else "failed"
+            error = None if status == "passed" else raw.get("error") or "SSID not visible"
+        elif cmd == "association_test":
+            if not expected_ssid:
+                return _make_skipped(step, "skipped: no_expected_ssid")
+            iface = detect_wifi_iface() or "wlan0"
+            target = expected_ssid
+            raw = await loop.run_in_executor(None, run_association_test, expected_ssid, iface, 20, "")
+            result_summary = raw
+            status = "passed" if raw.get("success") else "failed"
+            error = None if status == "passed" else raw.get("error")
+        elif cmd == "dhcp_test":
+            iface = detect_wifi_iface() or "eth0"
+            target = iface
+            raw = await loop.run_in_executor(None, _run_dhcp_test_helper, iface)
+            result_summary = raw
+            status = "passed" if raw.get("success") else "failed"
+            error = None if status == "passed" else raw.get("error")
+        elif cmd == "gateway_ping":
+            gw = get_default_gateway()
+            target = gw
+            if not gw:
+                status = "failed"
+                error = "no default gateway"
+            else:
+                raw = await loop.run_in_executor(None, run_ping, gw, 3, 0, False, 1.0)
+                result_summary = raw
+                status = "passed" if raw.get("success") else "failed"
+                error = None if status == "passed" else raw.get("error") or f"packet_loss={raw.get('packet_loss_pct')}"
+        elif cmd in ("dns_primary", "dns_secondary"):
+            servers = get_dns_servers()
+            idx = 0 if cmd == "dns_primary" else 1
+            if len(servers) <= idx:
+                return _make_skipped(step,
+                                     f"skipped: no_{'primary' if idx == 0 else 'secondary'}_dns_configured")
+            server = servers[idx]
+            target = server
+            raw = await loop.run_in_executor(None, run_dns, "google.com", server, "A")
+            result_summary = raw
+            status = "passed" if raw.get("success") else "failed"
+            error = None if status == "passed" else raw.get("error")
+        elif cmd == "internet_ping":
+            target = "1.1.1.1+8.8.8.8"
+            r1 = await loop.run_in_executor(None, run_ping, "1.1.1.1", 3, 0, False, 1.0)
+            r2 = await loop.run_in_executor(None, run_ping, "8.8.8.8", 3, 0, False, 1.0)
+            losses = [r.get("packet_loss_pct", 100.0) for r in (r1, r2)]
+            result_summary = {"cloudflare": r1, "google": r2, "loss_pct_min": min(losses)}
+            either_passed = bool(r1.get("success") or r2.get("success"))
+            status = "passed" if either_passed else "failed"
+            error = None if either_passed else "both internet targets unreachable"
+        elif cmd == "http":
+            url = args.get("url", "")
+            if not url:
+                status = "failed"
+                error = "http step missing url"
+            else:
+                target = url
+                raw = await loop.run_in_executor(None, run_http_test, url, True, 15)
+                result_summary = raw
+                status = "passed" if raw.get("success") else "failed"
+                error = None if status == "passed" else raw.get("error")
+        elif cmd == "ping":
+            tgt = args.get("target", "")
+            if not tgt:
+                status = "failed"
+                error = "ping step missing target"
+            else:
+                target = tgt
+                raw = await loop.run_in_executor(None, run_ping, tgt, 10, 0, False, 1.0)
+                result_summary = raw
+                status = "passed" if raw.get("success") else "failed"
+                error = None if status == "passed" else raw.get("error") or f"packet_loss={raw.get('packet_loss_pct')}"
+        elif cmd == "speedtest":
+            target = "ookla"
+            raw = await loop.run_in_executor(None, run_speedtest)
+            result_summary = raw
+            status = "passed" if not raw.get("error") else "failed"
+            error = raw.get("error")
+        elif cmd == "zoom_test":
+            target = args.get("target") or args.get("url")
+            raw = await loop.run_in_executor(None, run_zoom_test)
+            result_summary = raw
+            status = "passed" if not raw.get("error") else "failed"
+            error = raw.get("error")
+        else:
+            status = "failed"
+            error = f"unknown command: {cmd}"
+    except Exception as e:
+        status = "failed"
+        error = f"{type(e).__name__}: {e}"
+
+    completed_at = time.time()
+    return {
+        "step_order": step["step_order"],
+        "layer": step["layer"],
+        "command": cmd,
+        "step_name": f"{step['layer']}/{cmd}",
+        "status": status,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "duration_ms": round((completed_at - started_at) * 1000, 1),
+        "target": target,
+        "result_summary": result_summary,
+        "error": error,
+        "depends_on": step.get("depends_on", []),
+    }
+
+
+def _run_dhcp_test_helper(iface: str) -> dict:
+    """Stub for dhcp_test until the run_dhcp_test agent function exists.
+
+    Returns a structured failure if run_dhcp_test isn't available so the
+    cycle still produces a valid step result. When run_dhcp_test lands,
+    this helper becomes a one-liner.
+    """
+    fn = globals().get("run_dhcp_test")
+    if fn is None:
+        return {"success": False, "interface": iface, "error": "run_dhcp_test not implemented"}
+    return fn(iface)
+
+
 def run_speedtest() -> dict:
     ok, raw = run_cmd(["speedtest", "--format=json", "--accept-license", "--accept-gdpr"], timeout=120)
     if not ok:
