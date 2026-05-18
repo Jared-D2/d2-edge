@@ -1,0 +1,29 @@
+# NetFlow / sFlow / IPFIX UDP relay — d2001-nw-pi01 → central netflow (.166.8)
+# All three protocols are fire-and-forget UDP from the FortiGate; we forward
+# each datagram verbatim to the central goflow2 collector. The source IP at
+# the collector will be this Pi (192.168.166.34), which is registered as
+# d2001's exporter in tenant_exporters.
+#
+# proxy_responses 0 — no response packets from the collector to relay back.
+# proxy_timeout 1s — quickly recycle UDP "sessions" (this avoids state buildup).
+
+worker_processes 1;
+events { worker_connections 256; }
+
+stream {
+  upstream netflow_central { server ${NETFLOW_COLLECTOR_HOST}:2055; }
+  upstream sflow_central   { server ${NETFLOW_COLLECTOR_HOST}:6343; }
+  upstream ipfix_central   { server ${NETFLOW_COLLECTOR_HOST}:4739; }
+
+  server { listen 2055 udp; proxy_pass netflow_central; proxy_responses 0; proxy_timeout 1s; }
+  server { listen 6343 udp; proxy_pass sflow_central;   proxy_responses 0; proxy_timeout 1s; }
+  server { listen 4739 udp; proxy_pass ipfix_central;   proxy_responses 0; proxy_timeout 1s; }
+}
+
+http {
+  access_log off;
+  server {
+    listen 127.0.0.1:8079;
+    location /healthz { return 200 "ok\n"; }
+  }
+}

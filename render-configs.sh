@@ -45,6 +45,15 @@ envsubst < "${EDGE_DIR}/zabbix-proxy/config/zabbix_proxy.conf.template"     > "$
 validate_rendered "${EDGE_DIR}/zabbix-proxy/config/zabbix_proxy.conf" || exit 1
 echo "[zabbix] rendered OK"
 
+# ─── netflow-proxy ────────────────────────────────────────────────────────
+# Only Pis that act as tenant flow exporters mount nginx.conf into the
+# netflow-proxy container, but rendering is cheap and unconditional so the
+# template is always kept in sync — the compose profile (DEPLOY_NETFLOW_PROXY)
+# decides whether the container actually runs.
+envsubst < "${EDGE_DIR}/netflow-proxy/nginx.conf.template"     > "${EDGE_DIR}/netflow-proxy/nginx.conf"
+validate_rendered "${EDGE_DIR}/netflow-proxy/nginx.conf" || exit 1
+echo "[netflow] rendered OK"
+
 # Build per-subnet client blocks for FreeRADIUS.
 # LOCAL_CLIENT_SUBNET can be a single CIDR ("10.0.0.0/8") OR a list
 # separated by spaces or commas ("10.0.0.0/8 192.168.1.0/24").

@@ -244,3 +244,26 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # ─── NetFlow / sFlow / IPFIX relay ────────────────────────────────────────
+  # nginx stream mode forwards UDP datagrams from this Pi to the central
+  # goflow2 collector at NETFLOW_COLLECTOR_HOST. The collector keys exporter
+  # → tenant by source IP, so each tenant proxy Pi must be registered in
+  # tenant_exporters as that tenant's exporter (e.g. d2001-nw-pi01 →
+  # 192.168.166.34 → d2001). nginx.conf is rendered by render-configs.sh
+  # from netflow-proxy/nginx.conf.template.
+  netflow-proxy:
+    image: nginx:1.27-alpine
+    container_name: netflow-proxy
+    profiles: ["${DEPLOY_NETFLOW_PROXY:-enabled}"]
+    hostname: netflow-proxy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./netflow-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8079/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -19,6 +19,7 @@ zabbix-proxy/config/zabbix_proxy.conf
 zabbix-proxy/config/enc/
 zabbix-proxy/data/
 zabbix-proxy/logs/
+netflow-proxy/nginx.conf
 
 # Runtime restore points and buffer DB
 *.before-*

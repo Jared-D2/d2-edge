@@ -30,6 +30,24 @@ if [[ -f "$EDGE_DIR/.env" ]] && ! grep -q "^DOCKER_GID=" "$EDGE_DIR/.env"; then
     echo "Healed .env: appended DOCKER_GID=${DOCKER_GID} (legacy bootstrap)"
 fi
 
+# Heal .env if NETFLOW_COLLECTOR_HOST is missing — netflow-proxy templating
+# (2026-05-18) introduced this key. Legacy Pis (d2001-nw-pi01 had netflow-
+# proxy hand-installed with a hardcoded IP) won't have it; render-configs.sh
+# would fail validate_rendered on the unresolved ${NETFLOW_COLLECTOR_HOST}
+# placeholder. Fleet-wide default is 192.168.166.8 (central goflow2).
+if [[ -f "$EDGE_DIR/.env" ]] && ! grep -q "^NETFLOW_COLLECTOR_HOST=" "$EDGE_DIR/.env"; then
+    echo "NETFLOW_COLLECTOR_HOST=192.168.166.8" >> "$EDGE_DIR/.env"
+    echo "Healed .env: appended NETFLOW_COLLECTOR_HOST=192.168.166.8 (legacy bootstrap)"
+fi
+
+# Heal .env if SENSOR_MODE is missing — preflight enforces presence
+# (added 2026-05-18 alongside d2-agent sensor_mode work) but doesn't
+# self-heal. Default 'passive' is safe on any Pi.
+if [[ -f "$EDGE_DIR/.env" ]] && ! grep -q "^SENSOR_MODE=" "$EDGE_DIR/.env"; then
+    echo "SENSOR_MODE=passive" >> "$EDGE_DIR/.env"
+    echo "Healed .env: appended SENSOR_MODE=passive (legacy bootstrap)"
+fi
+
 # Heal .env duplicate KEY= lines. preflight.sh fails loud on conflicting
 # duplicates; here we silently dedup same-value duplicates (paste
 # accidents during onboarding) so update.sh stays self-healing on legacy
