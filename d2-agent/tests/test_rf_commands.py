@@ -49,3 +49,30 @@ def test_ssid_check_summarises_scan(monkeypatch):
     assert result["bssid_count"] == 2
     assert result["strongest_rssi"] == -45
     assert result["channels"] == [1, 6]
+
+
+def test_resolve_sensor_mode_defaults_to_passive(monkeypatch):
+    monkeypatch.delenv("SENSOR_MODE", raising=False)
+    assert app.resolve_sensor_mode() == "passive"
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("passive", "passive"),
+    ("active", "active"),
+    ("lab", "lab"),
+    ("PASSIVE", "passive"),
+    ("  active ", "active"),
+])
+def test_resolve_sensor_mode_accepts_known_values(monkeypatch, value, expected):
+    monkeypatch.setenv("SENSOR_MODE", value)
+    assert app.resolve_sensor_mode() == expected
+
+
+@pytest.mark.parametrize("bad", ["banana", "", "active;reboot", "lab\nactive"])
+def test_resolve_sensor_mode_coerces_unknown_to_passive(monkeypatch, caplog, bad):
+    monkeypatch.setenv("SENSOR_MODE", bad)
+    with caplog.at_level("WARNING"):
+        assert app.resolve_sensor_mode() == "passive"
+    # Empty string is a "default" path — no warning. Anything truthy-but-invalid logs.
+    if bad.strip():
+        assert any("SENSOR_MODE" in r.getMessage() for r in caplog.records)

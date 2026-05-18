@@ -50,6 +50,22 @@ ALLOWED_COMMANDS = set(c.strip() for c in _allowed_env.split(",") if c.strip()) 
 NETBOX_SITE_SLUG = os.getenv("NETBOX_SITE_SLUG", "")
 GIT_SHA = os.getenv("GIT_SHA", "unknown").strip() or "unknown"
 
+SENSOR_MODE_VALID = ("passive", "active", "lab")
+
+
+def resolve_sensor_mode() -> str:
+    raw = (os.getenv("SENSOR_MODE", "") or "").strip().lower()
+    if not raw:
+        return "passive"
+    if raw in SENSOR_MODE_VALID:
+        return raw
+    log.warning("Invalid SENSOR_MODE=%r; coercing to passive", raw)
+    return "passive"
+
+
+SENSOR_MODE = resolve_sensor_mode()
+log.info("SENSOR_MODE=%s", SENSOR_MODE)
+
 if not AGENT_TOKEN or AGENT_TOKEN == "change-me":
     log.critical("AGENT_TOKEN is not set. Refusing to start.")
     sys.exit(1)
