@@ -3,6 +3,7 @@ Slice B1+B2 — UXI Cycle Runner (2026-05-18).
 """
 import os
 import sys
+import time
 
 import pytest
 
@@ -206,3 +207,178 @@ async def test_run_step_records_duration(monkeypatch):
     result = await app._run_step(step, expected_ssid=None)
     assert isinstance(result["duration_ms"], (int, float))
     assert result["duration_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_short_circuits_on_rf_failure(monkeypatch):
+    """ap_scan fail → ssid_check/association_test/dhcp/etc. skipped via depends_on."""
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "SENSOR_MODE", "active")
+    # Make capability check pass so ap_scan actually runs (then fails).
+    monkeypatch.setattr(app, "_build_capabilities",
+                        lambda: {"rf_scan": True, "rf_tool": "nmcli",
+                                 "wifi_iface": "wlan0", "association_test": True,
+                                 "last_rf_error": None})
+    monkeypatch.setattr(app, "run_ap_scan",
+                        lambda interface="wlan0": {"success": False, "interface": interface,
+                                                    "aps": [], "error": "no_tool"})
+
+    params = {"cycle_id": "test-1", "expected_ssid": "Corp", "profiles": []}
+    result = await app.run_cycle(params)
+    by_order = {s["step_order"]: s for s in result["steps"]}
+    assert by_order[10]["status"] == "failed"
+    assert by_order[20]["status"] == "skipped"
+    assert by_order[30]["status"] == "skipped"
+    assert by_order[40]["status"] == "skipped"
+    # Cycle status: core step 10 failed → cycle failed.
+    assert result["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_passive_mode_skips_association_not_fails(monkeypatch):
+    """sensor_mode=passive → step 30 skipped, downstream still tries to run
+    because skip != fail."""
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "_build_capabilities",
+                        lambda: {"rf_scan": True, "rf_tool": "nmcli",
+                                 "wifi_iface": "wlan0", "association_test": False,
+                                 "last_rf_error": None})
+    monkeypatch.setattr(app, "run_ap_scan",
+                        lambda interface="wlan0": {"success": True, "interface": interface,
+                                                    "aps": [{"ssid": "Corp", "bssid": "aa", "rssi": -50}],
+                                                    "timestamp": 1.0})
+    monkeypatch.setattr(app, "run_ssid_check",
+                        lambda ssid, interface="wlan0": {"success": True, "visible": True,
+                                                          "ssid": ssid, "interface": interface,
+                                                          "bssid_count": 1, "strongest_rssi": -50,
+                                                          "channels": [1], "bssids": ["a"], "error": None})
+    monkeypatch.setattr(app, "run_ping",
+                        lambda target, count=10, size=0, df=False, interval=1.0:
+                        {"success": True, "target": target, "packet_loss_pct": 0.0,
+                         "rtt_avg_ms": 5.0})
+    monkeypatch.setattr(app, "_run_dhcp_test_helper",
+                        lambda iface: {"success": True, "interface": iface,
+                                       "ip_address": "10.0.0.50", "lease_seconds": 3600})
+    monkeypatch.setattr(app, "get_default_gateway", lambda: "10.0.0.1")
+    monkeypatch.setattr(app, "get_dns_servers", lambda: ["8.8.8.8", "1.1.1.1"])
+    monkeypatch.setattr(app, "run_dns",
+                        lambda target="google.com", server="", record_type="A":
+                        {"success": True, "target": target, "server": server, "answers": ["1.2.3.4"]})
+
+    params = {"cycle_id": "test-2", "expected_ssid": "Corp", "profiles": []}
+    result = await app.run_cycle(params)
+    by_order = {s["step_order"]: s for s in result["steps"]}
+    assert by_order[30]["status"] == "skipped"
+    assert "passive" in by_order[30]["error"].lower()
+    # Step 40 (dhcp_test) depends on 30 — since 30 is skipped (not failed),
+    # dhcp_test will run.
+    assert by_order[40]["status"] in ("passed", "failed")  # not skipped
+    # Steps 50-80 should run.
+    assert by_order[50]["status"] == "passed"
+    assert by_order[60]["status"] == "passed"
+    assert by_order[80]["status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_app_profiles_concatenate(monkeypatch):
+    """Multiple profiles run in order after the core."""
+    monkeypatch.setattr(app, "SENSOR_MODE", "active")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "_build_capabilities",
+                        lambda: {"rf_scan": True, "rf_tool": "nmcli",
+                                 "wifi_iface": "wlan0", "association_test": True,
+                                 "last_rf_error": None})
+    monkeypatch.setattr(app, "run_ap_scan",
+                        lambda interface="wlan0": {"success": True, "interface": interface,
+                                                    "aps": [{"ssid": "Corp", "rssi": -50, "bssid": "a"}],
+                                                    "timestamp": 1.0})
+    monkeypatch.setattr(app, "run_ssid_check",
+                        lambda ssid, interface="wlan0": {"success": True, "visible": True,
+                                                          "ssid": ssid, "interface": interface,
+                                                          "bssid_count": 1, "strongest_rssi": -50,
+                                                          "channels": [1], "bssids": ["a"], "error": None})
+    monkeypatch.setattr(app, "run_association_test",
+                        lambda ssid, interface="wlan0", timeout=20, password="":
+                        {"success": True, "ssid": ssid, "interface": interface})
+    monkeypatch.setattr(app, "run_ping",
+                        lambda target, count=10, size=0, df=False, interval=1.0:
+                        {"success": True, "target": target, "packet_loss_pct": 0.0,
+                         "rtt_avg_ms": 5.0})
+    monkeypatch.setattr(app, "_run_dhcp_test_helper",
+                        lambda iface: {"success": True, "interface": iface,
+                                       "ip_address": "10.0.0.50", "lease_seconds": 3600})
+    monkeypatch.setattr(app, "get_default_gateway", lambda: "10.0.0.1")
+    monkeypatch.setattr(app, "get_dns_servers", lambda: ["8.8.8.8", "1.1.1.1"])
+    monkeypatch.setattr(app, "run_dns",
+                        lambda target="google.com", server="", record_type="A":
+                        {"success": True, "target": target, "server": server, "answers": ["1.2.3.4"]})
+    http_calls = []
+    def fake_http(url, follow_redirects=True, timeout=15):
+        http_calls.append(url)
+        return {"success": True, "url": url, "status_code": 200, "total_ms": 200}
+    monkeypatch.setattr(app, "run_http_test", fake_http)
+
+    profiles = [
+        {"id": "a", "steps": [{"type": "http", "url": "https://a.example"}]},
+        {"id": "b", "steps": [{"type": "http", "url": "https://b.example"}]},
+    ]
+    params = {"cycle_id": "test-3", "expected_ssid": "Corp", "profiles": profiles}
+    result = await app.run_cycle(params)
+    orders = [s["step_order"] for s in result["steps"]]
+    # Core 10..80, then 100 (a), then 200 (b)
+    assert orders == [10, 20, 30, 40, 50, 60, 70, 80, 100, 200]
+    assert http_calls == ["https://a.example", "https://b.example"]
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_timeout_returns_partial(monkeypatch):
+    """cycle_timeout_seconds=0 → immediate timeout; subsequent steps skipped."""
+    monkeypatch.setattr(app, "SENSOR_MODE", "active")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "_build_capabilities",
+                        lambda: {"rf_scan": True, "rf_tool": "nmcli",
+                                 "wifi_iface": "wlan0", "association_test": True,
+                                 "last_rf_error": None})
+    def slow_ap_scan(interface="wlan0"):
+        time.sleep(0.05)
+        return {"success": True, "interface": interface, "aps": []}
+    monkeypatch.setattr(app, "run_ap_scan", slow_ap_scan)
+
+    params = {"cycle_id": "test-4", "expected_ssid": "Corp",
+              "profiles": [], "cycle_timeout_seconds": 0.01}
+    result = await app.run_cycle(params)
+    assert result["status"] == "timed_out"
+    later_steps = [s for s in result["steps"] if s["step_order"] > 10]
+    assert any("timeout" in (s.get("error") or "").lower() for s in later_steps)
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_result_envelope_shape(monkeypatch):
+    """The cycle_result envelope has all the required top-level keys."""
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: None)  # no RF
+    monkeypatch.setattr(app, "_build_capabilities",
+                        lambda: {"rf_scan": False, "rf_tool": None,
+                                 "wifi_iface": None, "association_test": False,
+                                 "last_rf_error": None})
+    monkeypatch.setattr(app, "get_default_gateway", lambda: "10.0.0.1")
+    monkeypatch.setattr(app, "get_dns_servers", lambda: ["8.8.8.8", "1.1.1.1"])
+    monkeypatch.setattr(app, "run_ping",
+                        lambda target, count=10, size=0, df=False, interval=1.0:
+                        {"success": True, "target": target, "packet_loss_pct": 0.0})
+    monkeypatch.setattr(app, "run_dns",
+                        lambda target="google.com", server="", record_type="A":
+                        {"success": True, "target": target, "server": server, "answers": ["1.2.3.4"]})
+
+    params = {"cycle_id": "shape-test", "expected_ssid": None, "profiles": []}
+    result = await app.run_cycle(params)
+    assert result["type"] == "cycle_result"
+    assert result["agent_id"] == app.AGENT_ID
+    assert result["tenant_id"] == app.TENANT_ID
+    assert result["cycle_id"] == "shape-test"
+    assert "started_at" in result
+    assert "completed_at" in result
+    assert result["status"] in ("completed", "failed", "timed_out")
+    assert isinstance(result["steps"], list)
+    assert len(result["steps"]) == 8  # core only

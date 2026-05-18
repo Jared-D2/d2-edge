@@ -919,6 +919,93 @@ def _run_dhcp_test_helper(iface: str) -> dict:
     return fn(iface)
 
 
+_cycle_in_flight = False
+
+
+def _should_skip_for_capability(step: dict, expected_ssid: str | None) -> str | None:
+    """Return a skip reason if this step should be skipped before running, else None."""
+    cmd = step["command"]
+    if cmd == "ap_scan":
+        caps = _build_capabilities()
+        if not caps.get("rf_scan"):
+            return "skipped: no_rf_capability"
+    elif cmd == "ssid_check":
+        if not expected_ssid:
+            return "skipped: no_expected_ssid"
+    elif cmd == "association_test":
+        if SENSOR_MODE not in ("active", "lab"):
+            return f"skipped: sensor_mode_{SENSOR_MODE}"
+        if not expected_ssid:
+            return "skipped: no_expected_ssid"
+    return None
+
+
+async def run_cycle(params: dict) -> dict:
+    """Execute one ordered UXI cycle. Returns the cycle_result envelope."""
+    cycle_id      = params.get("cycle_id", "")
+    expected_ssid = params.get("expected_ssid")
+    profiles      = params.get("profiles", [])
+    timeout       = float(params.get("cycle_timeout_seconds", 60))
+
+    started_at = time.time()
+    deadline   = started_at + timeout
+    composed   = _compose_cycle_steps(profiles)
+    steps_results: list = []
+    failed_or_skipped_orders: set = set()
+
+    for step in composed:
+        # 1. Timeout check
+        if time.time() >= deadline:
+            steps_results.append(_make_skipped(step, "skipped: cycle_timeout"))
+            failed_or_skipped_orders.add(step["step_order"])
+            continue
+
+        # 2. Capability / mode pre-skip
+        cap_reason = _should_skip_for_capability(step, expected_ssid)
+        if cap_reason:
+            steps_results.append(_make_skipped(step, cap_reason))
+            # Differentiated propagation: no_rf_capability + no_expected_ssid
+            # propagate; sensor_mode_passive does NOT (skip != fail).
+            if "no_rf_capability" in cap_reason or "no_expected_ssid" in cap_reason:
+                failed_or_skipped_orders.add(step["step_order"])
+            continue
+
+        # 3. Dependency check
+        deps = step.get("depends_on", [])
+        if deps and any(d in failed_or_skipped_orders for d in deps):
+            failed_dep = next(d for d in deps if d in failed_or_skipped_orders)
+            steps_results.append(_make_skipped(step,
+                                                f"skipped: dependency step {failed_dep} failed"))
+            failed_or_skipped_orders.add(step["step_order"])
+            continue
+
+        # 4. Run the step
+        result = await _run_step(step, expected_ssid=expected_ssid)
+        steps_results.append(result)
+        if result["status"] == "failed":
+            failed_or_skipped_orders.add(step["step_order"])
+
+    completed_at = time.time()
+    timed_out = completed_at >= deadline and len(
+        [s for s in steps_results if s["status"] != "skipped"]) < len(composed)
+    core_failed = any(
+        s["status"] == "failed" and s["step_order"] < 100
+        for s in steps_results
+    )
+    status = "timed_out" if timed_out else ("failed" if core_failed else "completed")
+
+    return {
+        "type": "cycle_result",
+        "agent_id": AGENT_ID,
+        "tenant_id": TENANT_ID,
+        "cycle_id": cycle_id,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "status": status,
+        "steps": steps_results,
+    }
+
+
 def run_speedtest() -> dict:
     ok, raw = run_cmd(["speedtest", "--format=json", "--accept-license", "--accept-gdpr"], timeout=120)
     if not ok:
