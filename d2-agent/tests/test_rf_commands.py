@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -239,3 +240,72 @@ def test_system_info_reports_no_rf_tool_when_neither_installed(monkeypatch):
     caps = info["capabilities"]
     assert caps["rf_tool"] is None
     assert caps["rf_scan"] is False  # no tool, even though iface exists
+
+
+class _FakeWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, msg):
+        self.sent.append(msg)
+
+
+@pytest.mark.asyncio
+async def test_handle_command_refuses_association_test_when_passive(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "ALLOWED_COMMANDS", None)
+    monkeypatch.setattr(app, "run_association_test",
+                        lambda *a, **kw: pytest.fail("must not be called"))
+    ws = _FakeWS()
+    payload = json.dumps({
+        "command": "association_test",
+        "job_id": "job-1",
+        "params": {"ssid": "Corp", "interface": "wlan0"},
+    })
+    await app.handle_command(ws, payload)
+    assert len(ws.sent) == 1
+    sent = json.loads(ws.sent[0])
+    assert sent["command"] == "association_test"
+    assert "refused" in sent["result"]["error"].lower()
+    assert "passive" in sent["result"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_handle_command_allows_association_test_when_active(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "active")
+    monkeypatch.setattr(app, "ALLOWED_COMMANDS", None)
+    called = {}
+    def fake_run(ssid, interface="wlan0", timeout=20, password=""):
+        called["ssid"] = ssid
+        return {"success": True, "interface": interface, "ssid": ssid}
+    monkeypatch.setattr(app, "run_association_test", fake_run)
+    ws = _FakeWS()
+    payload = json.dumps({
+        "command": "association_test",
+        "job_id": "job-2",
+        "params": {"ssid": "Corp", "interface": "wlan0"},
+    })
+    await app.handle_command(ws, payload)
+    assert called["ssid"] == "Corp"
+    sent = json.loads(ws.sent[0])
+    assert sent["result"]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_command_refuses_association_test_when_lab_allows(monkeypatch):
+    """lab mode is the most permissive — also allows association_test."""
+    monkeypatch.setattr(app, "SENSOR_MODE", "lab")
+    monkeypatch.setattr(app, "ALLOWED_COMMANDS", None)
+    called = {}
+    def fake_run(ssid, interface="wlan0", timeout=20, password=""):
+        called["ssid"] = ssid
+        return {"success": True}
+    monkeypatch.setattr(app, "run_association_test", fake_run)
+    ws = _FakeWS()
+    payload = json.dumps({
+        "command": "association_test",
+        "job_id": "job-3",
+        "params": {"ssid": "Corp", "interface": "wlan0"},
+    })
+    await app.handle_command(ws, payload)
+    assert called.get("ssid") == "Corp"

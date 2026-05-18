@@ -1876,12 +1876,15 @@ async def handle_command(ws, raw: str):
             interface = validate_wifi_interface(params.get("interface", "wlan0"))
             result = await loop.run_in_executor(None, run_ssid_check, ssid, interface)
         elif cmd == "association_test":
-            ssid = validate_ssid(params.get("ssid", ""))
-            interface = validate_wifi_interface(params.get("interface", "wlan0"))
-            timeout = int(params.get("timeout", 20))
-            password = params.get("password", "")
-            result = await loop.run_in_executor(
-                None, run_association_test, ssid, interface, timeout, password)
+            if SENSOR_MODE not in ("active", "lab"):
+                result = {"error": f"association_test refused: sensor_mode={SENSOR_MODE}"}
+            else:
+                ssid = validate_ssid(params.get("ssid", ""))
+                interface = validate_wifi_interface(params.get("interface", "wlan0"))
+                timeout = int(params.get("timeout", 20))
+                password = params.get("password", "")
+                result = await loop.run_in_executor(
+                    None, run_association_test, ssid, interface, timeout, password)
         elif cmd == "config_update":
             # Atomic replace: build a new MonitorConfig and swap the module
             # reference. Read by the monitor loops as a single pointer deref,
