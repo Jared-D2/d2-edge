@@ -65,7 +65,7 @@ required=(
     GRAYLOG_HOST ZABBIX_SERVER_HOST ZABBIX_SERVER_PORT RADIUS_HOME_SERVER
     RADIUS_SHARED_SECRET LOCAL_CLIENT_SECRET LOCAL_CLIENT_SUBNET
     AUVIK_USERNAME AUVIK_API_KEY AUVIK_DOMAIN_PREFIX
-    AGENT_TOKEN CONTROLLER_URL
+    AGENT_TOKEN CONTROLLER_URL SENSOR_MODE
     RADSEC_CLIENT_SECRET
     DOCKER_GID
 )
@@ -115,6 +115,18 @@ if [[ -n "${DOCKER_GID:-}" ]]; then
             fail "DOCKER_GID=$DOCKER_GID in .env but host's docker GID is $actual_gid — update .env"
         fi
     fi
+fi
+
+# --- 5b. SENSOR_MODE must be one of passive|active|lab ------------------
+# Agent's resolve_sensor_mode() coerces invalid values to 'passive' with a
+# warning log; preflight catches typos (e.g. 'actively', 'lab1') here so
+# operators get a loud failure at deploy time instead of a silently downgraded
+# sensor mode.
+if [[ -n "${SENSOR_MODE:-}" && "${SENSOR_MODE}" != "REPLACE_ME" ]]; then
+    case "$SENSOR_MODE" in
+        passive|active|lab) ;;
+        *) fail "SENSOR_MODE='$SENSOR_MODE' is not one of: passive, active, lab" ;;
+    esac
 fi
 
 # --- 6. docker-compose.yml parses with this .env ------------------------
