@@ -472,6 +472,17 @@ def detect_wifi_iface() -> Optional[str]:
     return None
 
 
+_last_rf_error: Optional[str] = None
+
+
+def _set_rf_error(msg: Optional[str]) -> None:
+    global _last_rf_error
+    if msg is None:
+        _last_rf_error = None
+    else:
+        _last_rf_error = str(msg)[:200]
+
+
 def run_ap_scan(interface: str = "wlan0") -> dict:
     interface = validate_wifi_interface(interface)
     if shutil.which("nmcli"):
@@ -481,20 +492,24 @@ def run_ap_scan(interface: str = "wlan0") -> dict:
             timeout=30,
         )
         if not ok:
+            _set_rf_error(f"ap_scan({interface}) nmcli failed: {raw}")
             return {"success": False, "interface": interface, "aps": [], "error": raw}
         aps = parse_nmcli_wifi_scan(raw)
     elif shutil.which("iw"):
         ok, raw = run_cmd(["iw", "dev", interface, "scan"], timeout=30)
         if not ok:
+            _set_rf_error(f"ap_scan({interface}) iw failed: {raw}")
             return {"success": False, "interface": interface, "aps": [], "error": raw}
         aps = parse_iw_wifi_scan(raw)
     else:
+        _set_rf_error("Neither nmcli nor iw is installed")
         return {
             "success": False,
             "interface": interface,
             "aps": [],
             "error": "Neither nmcli nor iw is installed",
         }
+    _set_rf_error(None)
     return {
         "success": True,
         "interface": interface,
@@ -514,6 +529,10 @@ def run_ssid_check(ssid: str, interface: str = "wlan0") -> dict:
         if isinstance(rssi, (int, float)):
             strongest = rssi if strongest is None else max(strongest, rssi)
     visible = bool(matches)
+    if not visible:
+        _set_rf_error(scan.get("error") or f"ssid_check({ssid}) not visible")
+    else:
+        _set_rf_error(None)
     return {
         "success": bool(scan.get("success")) and visible,
         "interface": scan.get("interface", interface),

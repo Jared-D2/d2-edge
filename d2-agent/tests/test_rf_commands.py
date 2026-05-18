@@ -105,3 +105,69 @@ def test_detect_wifi_iface_picks_alphabetically_first(monkeypatch, tmp_path):
 def test_detect_wifi_iface_returns_none_when_sys_class_net_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "SYS_CLASS_NET", str(tmp_path / "does-not-exist"))
     assert app.detect_wifi_iface() is None
+
+
+def test_last_rf_error_cleared_on_successful_scan(monkeypatch):
+    app._last_rf_error = "stale failure"
+    monkeypatch.setattr(app.shutil, "which",
+                        lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
+    monkeypatch.setattr(app, "run_cmd", lambda cmd, timeout=60: (True, ""))
+    result = app.run_ap_scan("wlan0")
+    assert result["success"] is True
+    assert app._last_rf_error is None
+
+
+def test_last_rf_error_set_on_failed_scan(monkeypatch):
+    app._last_rf_error = None
+    monkeypatch.setattr(app.shutil, "which",
+                        lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
+    monkeypatch.setattr(app, "run_cmd",
+                        lambda cmd, timeout=60: (False, "Device 'wlan0' not found"))
+    result = app.run_ap_scan("wlan0")
+    assert result["success"] is False
+    assert app._last_rf_error is not None
+    assert "wlan0" in app._last_rf_error
+    assert len(app._last_rf_error) <= 200
+
+
+def test_last_rf_error_set_when_no_tools(monkeypatch):
+    app._last_rf_error = None
+    monkeypatch.setattr(app.shutil, "which", lambda name: None)
+    result = app.run_ap_scan("wlan0")
+    assert result["success"] is False
+    assert app._last_rf_error is not None
+
+
+def test_last_rf_error_trimmed_to_200_chars(monkeypatch):
+    app._last_rf_error = None
+    long_err = "x" * 500
+    monkeypatch.setattr(app.shutil, "which",
+                        lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
+    monkeypatch.setattr(app, "run_cmd", lambda cmd, timeout=60: (False, long_err))
+    app.run_ap_scan("wlan0")
+    assert app._last_rf_error is not None
+    assert len(app._last_rf_error) <= 200
+
+
+def test_last_rf_error_cleared_on_successful_ssid_check(monkeypatch):
+    app._last_rf_error = "stale"
+    # Stub run_ap_scan to return a successful scan that matches the SSID.
+    monkeypatch.setattr(app, "run_ap_scan", lambda interface="wlan0": {
+        "success": True, "interface": interface,
+        "aps": [{"ssid": "Corp", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 1, "rssi": -50}],
+    })
+    result = app.run_ssid_check("Corp", "wlan0")
+    assert result["visible"] is True
+    assert app._last_rf_error is None
+
+
+def test_last_rf_error_set_on_ssid_check_failure(monkeypatch):
+    app._last_rf_error = None
+    monkeypatch.setattr(app, "run_ap_scan", lambda interface="wlan0": {
+        "success": False, "interface": interface, "aps": [],
+        "error": "scan tool crashed",
+    })
+    result = app.run_ssid_check("Corp", "wlan0")
+    assert result["visible"] is False
+    assert app._last_rf_error is not None
+    assert "scan" in app._last_rf_error.lower() or "ssid" in app._last_rf_error.lower()
