@@ -458,6 +458,20 @@ def parse_iw_wifi_scan(raw: str) -> list:
     return aps
 
 
+SYS_CLASS_NET = "/sys/class/net"
+
+
+def detect_wifi_iface() -> Optional[str]:
+    try:
+        names = sorted(os.listdir(SYS_CLASS_NET))
+    except OSError:
+        return None
+    for name in names:
+        if os.path.isdir(os.path.join(SYS_CLASS_NET, name, "wireless")):
+            return name
+    return None
+
+
 def run_ap_scan(interface: str = "wlan0") -> dict:
     interface = validate_wifi_interface(interface)
     if shutil.which("nmcli"):

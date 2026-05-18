@@ -76,3 +76,32 @@ def test_resolve_sensor_mode_coerces_unknown_to_passive(monkeypatch, caplog, bad
     # Empty string is a "default" path — no warning. Anything truthy-but-invalid logs.
     if bad.strip():
         assert any("SENSOR_MODE" in r.getMessage() for r in caplog.records)
+
+
+def test_detect_wifi_iface_returns_none_when_no_wireless(monkeypatch, tmp_path):
+    (tmp_path / "eth0").mkdir()
+    monkeypatch.setattr(app, "SYS_CLASS_NET", str(tmp_path))
+    assert app.detect_wifi_iface() is None
+
+
+def test_detect_wifi_iface_returns_wlan0_when_present(monkeypatch, tmp_path):
+    (tmp_path / "eth0").mkdir()
+    wlan0 = tmp_path / "wlan0"
+    wlan0.mkdir()
+    (wlan0 / "wireless").mkdir()
+    monkeypatch.setattr(app, "SYS_CLASS_NET", str(tmp_path))
+    assert app.detect_wifi_iface() == "wlan0"
+
+
+def test_detect_wifi_iface_picks_alphabetically_first(monkeypatch, tmp_path):
+    for name in ("wlp2s0", "wlan0"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "wireless").mkdir()
+    monkeypatch.setattr(app, "SYS_CLASS_NET", str(tmp_path))
+    assert app.detect_wifi_iface() == "wlan0"
+
+
+def test_detect_wifi_iface_returns_none_when_sys_class_net_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "SYS_CLASS_NET", str(tmp_path / "does-not-exist"))
+    assert app.detect_wifi_iface() is None
