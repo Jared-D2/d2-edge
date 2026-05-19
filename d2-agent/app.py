@@ -1601,7 +1601,7 @@ def run_traceroute(target: str, use_mtr: bool = False, count: int = 10) -> dict:
                 pass
         return {"raw": raw, "success": False, "type": "mtr", "target": target, "hops": []}
     else:
-        ok, raw = run_cmd(["traceroute", "-n", "-m", "20", target], timeout=60)
+        ok, raw = run_cmd(["traceroute", "-I", "-n", "-m", "20", target], timeout=60)
         hops = parse_traceroute(raw) if ok else []
         return {"hops": hops, "target": target, "success": ok, "type": "traceroute", "raw": raw}
 
