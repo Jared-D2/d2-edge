@@ -288,6 +288,34 @@ def get_observed_dhcp_lease(interface: str) -> dict:
         result["error"] = f"observed lease check failed: {e}"
     return result
 
+
+def run_dhcp_test_for_sensor(interface: str = "eth0") -> dict:
+    """Run DHCP test with passive-sensor lease observation fallback."""
+    raw = run_dhcp_test(interface)
+    if raw.get("success") or SENSOR_MODE != "passive":
+        return raw
+
+    observed = get_observed_dhcp_lease(interface)
+    if not observed.get("success"):
+        return raw
+
+    return {
+        "command": "dhcp_test",
+        "interface": interface,
+        "success": True,
+        "discover_ms": None,
+        "ack_ms": None,
+        "total_ms": None,
+        "offered_ip": observed.get("ip_address"),
+        "lease_s": None,
+        "server_ip": observed.get("gateway"),
+        "error": None,
+        "mode": "observed_lease_fallback",
+        "warning": "Synthetic DHCP DORA probe failed; passive sensor observed an active DHCP lease instead.",
+        "synthetic_dora": raw,
+        "observed_lease": observed,
+    }
+
 # Hostname / IP targets: must start + end with alnum, no leading hyphen (argv
 # injection defense: blocks "-f", "--iflist", etc. being mistaken for flags by
 # ping/traceroute/nmap/dig). Max label length 63, max total 253.
@@ -891,19 +919,7 @@ async def _run_step(step: dict, expected_ssid: str | None) -> dict:
         elif cmd == "dhcp_test":
             iface = get_dhcp_test_iface()
             target = iface
-            raw = await loop.run_in_executor(None, _run_dhcp_test_helper, iface)
-            if not raw.get("success") and SENSOR_MODE == "passive":
-                observed = await loop.run_in_executor(None, get_observed_dhcp_lease, iface)
-                if observed.get("success"):
-                    raw = {
-                        "command": "dhcp_test",
-                        "interface": iface,
-                        "success": True,
-                        "mode": "observed_lease_fallback",
-                        "warning": "Synthetic DHCP DORA probe failed; passive sensor observed an active DHCP lease instead.",
-                        "synthetic_dora": raw,
-                        "observed_lease": observed,
-                    }
+            raw = await loop.run_in_executor(None, run_dhcp_test_for_sensor, iface)
             result_summary = raw
             status = "passed" if raw.get("success") else "failed"
             error = None if status == "passed" else raw.get("error")
@@ -2406,7 +2422,7 @@ async def handle_command(ws, raw: str):
             result = await loop.run_in_executor(None, run_zoom_test)
         elif cmd == "dhcp_test":
             iface = params.get("interface", "eth0")
-            result = await loop.run_in_executor(None, run_dhcp_test, iface)
+            result = await loop.run_in_executor(None, run_dhcp_test_for_sensor, iface)
         elif cmd == "ap_scan":
             interface = validate_wifi_interface(params.get("interface", "wlan0"))
             result = await loop.run_in_executor(None, run_ap_scan, interface)

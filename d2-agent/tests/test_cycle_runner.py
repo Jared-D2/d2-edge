@@ -182,6 +182,27 @@ async def test_run_step_dhcp_passive_falls_back_to_observed_lease(monkeypatch):
     assert result["result_summary"]["observed_lease"]["ip_address"] == "192.168.21.16"
 
 
+def test_run_dhcp_test_for_sensor_passive_falls_back_to_observed_lease(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "run_dhcp_test",
+                        lambda iface: {"success": False, "interface": iface,
+                                       "error": "No DHCP Offer received within 10s"})
+    monkeypatch.setattr(app, "get_observed_dhcp_lease",
+                        lambda iface: {"success": True, "interface": iface,
+                                       "ip_address": "192.168.21.16",
+                                       "gateway": "192.168.21.254",
+                                       "source": "route_proto_dhcp"})
+
+    result = app.run_dhcp_test_for_sensor("eth0")
+
+    assert result["success"] is True
+    assert result["mode"] == "observed_lease_fallback"
+    assert result["offered_ip"] == "192.168.21.16"
+    assert result["server_ip"] == "192.168.21.254"
+    assert result["error"] is None
+    assert result["synthetic_dora"]["success"] is False
+
+
 @pytest.mark.asyncio
 async def test_run_step_dns_primary_uses_first_resolver(monkeypatch):
     """dns_primary uses the first DNS server from /etc/resolv.conf."""
