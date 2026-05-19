@@ -238,6 +238,56 @@ def get_dhcp_test_iface() -> str:
         return validate_wifi_interface(wifi_iface)
     return "eth0"
 
+
+def get_observed_dhcp_lease(interface: str) -> dict:
+    """Report the active DHCP lease already held by an interface.
+
+    Passive sensors should not disrupt the live interface just to prove DHCP
+    when switch security blocks extra synthetic MACs. This is intentionally
+    labelled as observed state, not a successful DORA probe.
+    """
+    result = {
+        "success": False,
+        "interface": interface,
+        "source": "observed_lease",
+        "ip_address": None,
+        "prefix": None,
+        "gateway": None,
+        "error": None,
+    }
+    try:
+        ok, addr_raw = run_cmd(["ip", "-4", "addr", "show", "dev", interface], timeout=5)
+        if not ok:
+            result["error"] = addr_raw or "unable to inspect interface address"
+            return result
+        for line in addr_raw.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[0] == "inet":
+                ip_iface = parts[1]
+                ip_addr, _, prefix = ip_iface.partition("/")
+                result["ip_address"] = ip_addr
+                result["prefix"] = int(prefix) if prefix.isdigit() else None
+                if "dynamic" in parts:
+                    result["source"] = "ip_addr_dynamic"
+                    break
+
+        ok, route_raw = run_cmd(["ip", "route", "show", "default", "dev", interface], timeout=5)
+        if ok:
+            route_parts = route_raw.strip().split()
+            if "via" in route_parts:
+                result["gateway"] = route_parts[route_parts.index("via") + 1]
+            if "proto" in route_parts and route_parts[route_parts.index("proto") + 1] == "dhcp":
+                result["source"] = "route_proto_dhcp"
+
+        if result["ip_address"] and result["source"] in ("ip_addr_dynamic", "route_proto_dhcp"):
+            result["success"] = True
+            return result
+
+        result["error"] = "No active DHCP-derived lease observed"
+    except Exception as e:
+        result["error"] = f"observed lease check failed: {e}"
+    return result
+
 # Hostname / IP targets: must start + end with alnum, no leading hyphen (argv
 # injection defense: blocks "-f", "--iflist", etc. being mistaken for flags by
 # ping/traceroute/nmap/dig). Max label length 63, max total 253.
@@ -842,6 +892,18 @@ async def _run_step(step: dict, expected_ssid: str | None) -> dict:
             iface = get_dhcp_test_iface()
             target = iface
             raw = await loop.run_in_executor(None, _run_dhcp_test_helper, iface)
+            if not raw.get("success") and SENSOR_MODE == "passive":
+                observed = await loop.run_in_executor(None, get_observed_dhcp_lease, iface)
+                if observed.get("success"):
+                    raw = {
+                        "command": "dhcp_test",
+                        "interface": iface,
+                        "success": True,
+                        "mode": "observed_lease_fallback",
+                        "warning": "Synthetic DHCP DORA probe failed; passive sensor observed an active DHCP lease instead.",
+                        "synthetic_dora": raw,
+                        "observed_lease": observed,
+                    }
             result_summary = raw
             status = "passed" if raw.get("success") else "failed"
             error = None if status == "passed" else raw.get("error")
@@ -1386,15 +1448,21 @@ def run_dhcp_test(interface: str = "eth0") -> dict:
         msg = bytearray(236)
         msg[0] = 1; msg[1] = 1; msg[2] = 6
         struct.pack_into("!I", msg, 4, xid)
-        struct.pack_into("!H", msg, 10, 0x8000)  # broadcast flag
+        if msg_type != 7:  # Release has no response — broadcast flag irrelevant and wrong
+            struct.pack_into("!H", msg, 10, 0x8000)
         msg[28:34] = fake_mac
+        if msg_type == 7 and offered_ip:  # RFC 2131: ciaddr must be set in Release
+            msg[12:16] = socket.inet_aton(offered_ip)
         dhcp = bytes(msg) + b"\x63\x82\x53\x63"
         dhcp += bytes([53, 1, msg_type])
         dhcp += bytes([61, 7, 1]) + fake_mac
         if msg_type == 3:
             dhcp += bytes([50, 4]) + socket.inet_aton(offered_ip)
             dhcp += bytes([54, 4]) + socket.inet_aton(server_ip)
-        dhcp += bytes([55, 3, 1, 3, 6])
+        elif msg_type == 7 and server_ip:  # RFC 2131: Server Identifier required in Release
+            dhcp += bytes([54, 4]) + socket.inet_aton(server_ip)
+        if msg_type != 7:  # Parameter Request List not applicable to Release
+            dhcp += bytes([55, 3, 1, 3, 6])
         dhcp += bytes([255])
         return dhcp
 
@@ -1500,6 +1568,7 @@ def run_dhcp_test(interface: str = "eth0") -> dict:
             srv = server_ip_str or "255.255.255.255"
             rel = build_ethernet(fake_mac, build_ipv4(
                 build_udp(68, 67, build_dhcp(7, offered_ip, srv)),
+                src=socket.inet_aton(offered_ip),
                 dst=socket.inet_aton(srv)))
             sock.send(rel)
         except Exception:

@@ -159,6 +159,30 @@ async def test_run_step_dhcp_prefers_default_iface_over_wifi(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_step_dhcp_passive_falls_back_to_observed_lease(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "DHCP_TEST_IFACE", "eth0")
+    monkeypatch.setattr(app, "_run_dhcp_test_helper",
+                        lambda iface: {"success": False, "interface": iface,
+                                       "error": "No DHCP Offer received within 10s"})
+    monkeypatch.setattr(app, "get_observed_dhcp_lease",
+                        lambda iface: {"success": True, "interface": iface,
+                                       "ip_address": "192.168.21.16",
+                                       "gateway": "192.168.21.254",
+                                       "source": "ip_addr_dynamic"})
+
+    step = {"step_order": 40, "layer": "ip_stack",
+            "command": "dhcp_test", "depends_on": [30]}
+    result = await app._run_step(step, expected_ssid=None)
+
+    assert result["status"] == "passed"
+    assert result["error"] is None
+    assert result["result_summary"]["mode"] == "observed_lease_fallback"
+    assert result["result_summary"]["synthetic_dora"]["success"] is False
+    assert result["result_summary"]["observed_lease"]["ip_address"] == "192.168.21.16"
+
+
+@pytest.mark.asyncio
 async def test_run_step_dns_primary_uses_first_resolver(monkeypatch):
     """dns_primary uses the first DNS server from /etc/resolv.conf."""
     captured = {}
