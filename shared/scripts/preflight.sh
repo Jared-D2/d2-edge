@@ -84,6 +84,13 @@ if [[ -f "$ENV_FILE" ]]; then
     host_docker_gid=$(getent group docker 2>/dev/null | cut -d: -f3 || true)
     [[ -n "$host_docker_gid" ]] && heal_defaults[DOCKER_GID]="$host_docker_gid"
 
+    # NETBOX_SITE_SLUG mirrors EDGE_SITE_ID by convention — both keys hold
+    # the tenant's NetBox site slug (steelriver, etc.). Heal so that Pis
+    # provisioned before NETBOX_SITE_SLUG was a required key recover via
+    # `git pull && update.sh` instead of needing manual .env editing.
+    existing_site_id=$(grep -E '^EDGE_SITE_ID=' "$ENV_FILE" | tail -1 | cut -d= -f2-)
+    [[ -n "$existing_site_id" ]] && heal_defaults[NETBOX_SITE_SLUG]="$existing_site_id"
+
     for k in "${!heal_defaults[@]}"; do
         if ! grep -q "^${k}=" "$ENV_FILE"; then
             if echo "${k}=${heal_defaults[$k]}" >> "$ENV_FILE" 2>/dev/null; then
