@@ -1050,6 +1050,104 @@ async def _run_cycle_and_send(ws, params: dict) -> None:
         _cycle_in_flight = False
 
 
+async def _run_triage_and_send(ws, params: dict) -> None:
+    """Background task: run a custom triage step list and ship cycle_result.
+
+    Triage runs supplied steps directly (no core sequence prepended). Same
+    envelope shape as run_cycle plus meta.triage_id for controller correlation.
+
+    Slice B3 — Triage Queue (2026-05-19).
+    """
+    global _cycle_in_flight
+    try:
+        triage_id = params.get("triage_id", "")
+        cycle_id = params.get("cycle_id", "")
+        expected_ssid = params.get("expected_ssid")
+        timeout = float(params.get("cycle_timeout_seconds", 30))
+        steps_in = params.get("steps", []) or []
+        started_at = time.time()
+        deadline = started_at + timeout
+        steps_results: list = []
+        for i, step_in in enumerate(steps_in):
+            if time.time() >= deadline:
+                steps_results.append(_make_skipped(
+                    {"step_order": (i + 1) * 10, "layer": "triage",
+                     "command": step_in.get("command", "?"), "depends_on": []},
+                    "skipped: triage_timeout"))
+                continue
+            step = {
+                "step_order": (i + 1) * 10,
+                "layer": _layer_for_triage_command(step_in.get("command", "")),
+                "command": step_in.get("command", ""),
+                "depends_on": [],
+                "_step_args": step_in.get("params") or step_in,
+            }
+            try:
+                result = await _run_step(step, expected_ssid=expected_ssid)
+            except Exception as e:
+                log.warning("triage step %s failed: %s", step["command"], e,
+                            exc_info=True)
+                result = _make_skipped(step, f"skipped: exception {type(e).__name__}")
+                result["status"] = "failed"
+                result["error"] = f"{type(e).__name__}: {e}"
+            steps_results.append(result)
+        completed_at = time.time()
+        any_failed = any(s.get("status") == "failed" for s in steps_results)
+        status = "failed" if any_failed else "completed"
+        envelope = {
+            "type": "cycle_result",
+            "agent_id": AGENT_ID,
+            "tenant_id": TENANT_ID,
+            "cycle_id": cycle_id,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "status": status,
+            "steps": steps_results,
+            "meta": {"triage_id": triage_id},
+        }
+        await ws.send(json.dumps(envelope))
+    except Exception as e:
+        log.warning("run_triage task failed: %s", e, exc_info=True)
+        try:
+            await ws.send(json.dumps({
+                "type": "cycle_result",
+                "agent_id": AGENT_ID,
+                "tenant_id": TENANT_ID,
+                "cycle_id": params.get("cycle_id", ""),
+                "started_at": time.time(),
+                "completed_at": time.time(),
+                "status": "failed",
+                "steps": [],
+                "meta": {"triage_id": params.get("triage_id", "")},
+                "error": f"{type(e).__name__}: {e}",
+            }))
+        except Exception:
+            pass
+    finally:
+        _cycle_in_flight = False
+
+
+def _layer_for_triage_command(cmd: str) -> str:
+    """Best-effort layer attribution for triage step results."""
+    if cmd in ("ap_scan", "ssid_check"):
+        return "rf"
+    if cmd == "association_test":
+        return "association"
+    if cmd == "dhcp_test":
+        return "ip_stack"
+    if cmd in ("gateway_ping", "internet_ping"):
+        return "connectivity"
+    if cmd in ("dns", "dns_primary", "dns_secondary"):
+        return "name_resolution"
+    if cmd == "traceroute":
+        return "path"
+    if cmd in ("http", "speedtest", "zoom_test"):
+        return "application"
+    if cmd == "mtu_test":
+        return "network"
+    return "triage"
+
+
 def run_speedtest() -> dict:
     ok, raw = run_cmd(["speedtest", "--format=json", "--accept-license", "--accept-gdpr"], timeout=120)
     if not ok:
@@ -2238,6 +2336,16 @@ async def handle_command(ws, raw: str):
                 _cycle_in_flight = True
                 asyncio.create_task(_run_cycle_and_send(ws, params))
                 return  # cycle_result follows asynchronously from the task.
+        elif cmd == "run_triage":
+            # _cycle_in_flight already declared global in the run_cycle branch
+            # above; reusing the same module-level gate so only one orchestrated
+            # sequence (cycle or triage) runs per agent at a time.
+            if _cycle_in_flight:
+                result = {"error": "cycle_in_flight"}
+            else:
+                _cycle_in_flight = True
+                asyncio.create_task(_run_triage_and_send(ws, params))
+                return
         elif cmd == "config_update":
             # Atomic replace: build a new MonitorConfig and swap the module
             # reference. Read by the monitor loops as a single pointer deref,

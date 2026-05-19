@@ -464,3 +464,75 @@ async def test_handle_command_run_cycle_refuses_when_in_flight(monkeypatch):
         assert "in_flight" in sent["result"]["error"]
     finally:
         app._cycle_in_flight = False
+
+
+@pytest.mark.asyncio
+async def test_handle_command_run_triage_runs_supplied_steps(monkeypatch):
+    """run_triage iterates params['steps'] via _run_step and sends one
+    cycle_result envelope with meta.triage_id set."""
+    import asyncio as _asyncio
+    monkeypatch.setattr(app, "ALLOWED_COMMANDS", None)
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: None)
+    monkeypatch.setattr(app, "_build_capabilities",
+                        lambda: {"rf_scan": False, "rf_tool": None,
+                                 "wifi_iface": None, "association_test": False,
+                                 "last_rf_error": None})
+    monkeypatch.setattr(app, "get_default_gateway", lambda: "10.0.0.1")
+    monkeypatch.setattr(app, "get_dns_servers", lambda: ["8.8.8.8", "1.1.1.1"])
+    monkeypatch.setattr(app, "run_ping",
+                        lambda target, count=10, size=0, df=False, interval=1.0:
+                        {"success": True, "target": target, "packet_loss_pct": 0.0})
+    monkeypatch.setattr(app, "run_dns",
+                        lambda target="google.com", server="", record_type="A":
+                        {"success": True, "target": target, "server": server, "answers": ["1.2.3.4"]})
+    app._cycle_in_flight = False
+    ws = _FakeWS()
+    payload = json.dumps({
+        "command": "run_triage",
+        "job_id": "job-triage-1",
+        "params": {
+            "triage_id": "triage-uuid-1",
+            "cycle_id": "cyc-triage-1",
+            "expected_ssid": None,
+            "steps": [
+                {"command": "gateway_ping"},
+                {"command": "dns_primary"},
+            ],
+            "cycle_timeout_seconds": 30,
+        },
+    })
+    await app.handle_command(ws, payload)
+    for _ in range(50):
+        if ws.sent:
+            break
+        await _asyncio.sleep(0.05)
+    assert len(ws.sent) >= 1
+    sent = json.loads(ws.sent[0])
+    assert sent.get("type") == "cycle_result"
+    assert sent.get("cycle_id") == "cyc-triage-1"
+    assert sent.get("meta", {}).get("triage_id") == "triage-uuid-1"
+    assert len(sent["steps"]) == 2
+    await _asyncio.sleep(0.05)
+    assert app._cycle_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_handle_command_run_triage_refuses_when_busy(monkeypatch):
+    monkeypatch.setattr(app, "ALLOWED_COMMANDS", None)
+    app._cycle_in_flight = True
+    try:
+        ws = _FakeWS()
+        payload = json.dumps({
+            "command": "run_triage",
+            "job_id": "job-triage-busy",
+            "params": {"triage_id": "t-busy", "cycle_id": "c-busy",
+                       "steps": []},
+        })
+        await app.handle_command(ws, payload)
+        assert len(ws.sent) == 1
+        sent = json.loads(ws.sent[0])
+        assert sent.get("type") == "result"
+        assert "in_flight" in sent["result"]["error"]
+    finally:
+        app._cycle_in_flight = False
