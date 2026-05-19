@@ -49,6 +49,7 @@ _allowed_env = os.getenv("ALLOWED_COMMANDS", "").strip()
 ALLOWED_COMMANDS = set(c.strip() for c in _allowed_env.split(",") if c.strip()) if _allowed_env else None
 NETBOX_SITE_SLUG = os.getenv("NETBOX_SITE_SLUG", "")
 GIT_SHA = os.getenv("GIT_SHA", "unknown").strip() or "unknown"
+DHCP_TEST_IFACE = os.getenv("DHCP_TEST_IFACE", "").strip()
 
 SENSOR_MODE_VALID = ("passive", "active", "lab")
 
@@ -210,6 +211,32 @@ def get_default_gateway() -> str:
     except Exception:
         pass
     return ""
+
+
+def get_default_iface() -> str:
+    """Read the interface used by the default route from /proc/net/route."""
+    try:
+        with open("/proc/net/route") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 8 and parts[1] == "00000000" and parts[7] == "00000000":
+                    return parts[0]
+    except Exception:
+        pass
+    return ""
+
+
+def get_dhcp_test_iface() -> str:
+    """Return the interface DHCP tests should use."""
+    if DHCP_TEST_IFACE:
+        return validate_wifi_interface(DHCP_TEST_IFACE)
+    default_iface = get_default_iface()
+    if default_iface:
+        return validate_wifi_interface(default_iface)
+    wifi_iface = detect_wifi_iface()
+    if wifi_iface:
+        return validate_wifi_interface(wifi_iface)
+    return "eth0"
 
 # Hostname / IP targets: must start + end with alnum, no leading hyphen (argv
 # injection defense: blocks "-f", "--iflist", etc. being mistaken for flags by
@@ -672,6 +699,7 @@ def get_tailscale_ip() -> str:
 
 def _build_capabilities() -> dict:
     iface = detect_wifi_iface()
+    dhcp_iface = get_dhcp_test_iface()
     nmcli = shutil.which("nmcli") is not None
     iw = shutil.which("iw") is not None
     if nmcli:
@@ -686,6 +714,7 @@ def _build_capabilities() -> dict:
         "rf_scan": rf_scan,
         "rf_tool": rf_tool,
         "wifi_iface": iface,
+        "dhcp_test_iface": dhcp_iface,
         "association_test": association_test,
         "last_rf_error": _last_rf_error,
     }
@@ -810,7 +839,7 @@ async def _run_step(step: dict, expected_ssid: str | None) -> dict:
             status = "passed" if raw.get("success") else "failed"
             error = None if status == "passed" else raw.get("error")
         elif cmd == "dhcp_test":
-            iface = detect_wifi_iface() or "eth0"
+            iface = get_dhcp_test_iface()
             target = iface
             raw = await loop.run_in_executor(None, _run_dhcp_test_helper, iface)
             result_summary = raw

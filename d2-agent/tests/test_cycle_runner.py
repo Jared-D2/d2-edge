@@ -121,6 +121,44 @@ async def test_run_step_ap_scan_uses_capability_iface(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_step_dhcp_prefers_configured_dhcp_iface(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(app, "DHCP_TEST_IFACE", "eth0")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "get_default_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "_run_dhcp_test_helper",
+                        lambda iface: captured.setdefault("iface", iface) or {
+                            "success": True, "interface": iface,
+                        })
+
+    step = {"step_order": 40, "layer": "ip_stack",
+            "command": "dhcp_test", "depends_on": [30]}
+    result = await app._run_step(step, expected_ssid=None)
+    assert captured["iface"] == "eth0"
+    assert result["target"] == "eth0"
+    assert result["status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_run_step_dhcp_prefers_default_iface_over_wifi(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(app, "DHCP_TEST_IFACE", "")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "get_default_iface", lambda: "eth0")
+    monkeypatch.setattr(app, "_run_dhcp_test_helper",
+                        lambda iface: captured.setdefault("iface", iface) or {
+                            "success": True, "interface": iface,
+                        })
+
+    step = {"step_order": 40, "layer": "ip_stack",
+            "command": "dhcp_test", "depends_on": [30]}
+    result = await app._run_step(step, expected_ssid=None)
+    assert captured["iface"] == "eth0"
+    assert result["target"] == "eth0"
+    assert result["status"] == "passed"
+
+
+@pytest.mark.asyncio
 async def test_run_step_dns_primary_uses_first_resolver(monkeypatch):
     """dns_primary uses the first DNS server from /etc/resolv.conf."""
     captured = {}

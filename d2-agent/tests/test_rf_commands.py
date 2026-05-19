@@ -224,6 +224,8 @@ def test_last_rf_error_set_on_ssid_check_failure(monkeypatch):
 def test_system_info_reports_sensor_mode_and_capabilities(monkeypatch):
     monkeypatch.setattr(app, "SENSOR_MODE", "passive")
     monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "get_default_iface", lambda: "eth0")
+    monkeypatch.setattr(app, "DHCP_TEST_IFACE", "")
     monkeypatch.setattr(app.shutil, "which",
                         lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
     app._last_rf_error = None
@@ -233,13 +235,26 @@ def test_system_info_reports_sensor_mode_and_capabilities(monkeypatch):
     assert caps["rf_scan"] is True
     assert caps["rf_tool"] == "nmcli"
     assert caps["wifi_iface"] == "wlan0"
+    assert caps["dhcp_test_iface"] == "eth0"
     assert caps["association_test"] is False  # passive
     assert caps["last_rf_error"] is None
+
+
+def test_system_info_reports_dhcp_iface_override(monkeypatch):
+    monkeypatch.setattr(app, "SENSOR_MODE", "passive")
+    monkeypatch.setattr(app, "detect_wifi_iface", lambda: "wlan0")
+    monkeypatch.setattr(app, "get_default_iface", lambda: "eth0")
+    monkeypatch.setattr(app, "DHCP_TEST_IFACE", "br-lan")
+    monkeypatch.setattr(app.shutil, "which", lambda name: None)
+    info = app.system_info()
+    assert info["capabilities"]["dhcp_test_iface"] == "br-lan"
 
 
 def test_system_info_reports_no_rf_when_no_wireless_iface(monkeypatch):
     monkeypatch.setattr(app, "SENSOR_MODE", "passive")
     monkeypatch.setattr(app, "detect_wifi_iface", lambda: None)
+    monkeypatch.setattr(app, "get_default_iface", lambda: "eth0")
+    monkeypatch.setattr(app, "DHCP_TEST_IFACE", "")
     monkeypatch.setattr(app.shutil, "which",
                         lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
     info = app.system_info()
@@ -247,6 +262,7 @@ def test_system_info_reports_no_rf_when_no_wireless_iface(monkeypatch):
     assert caps["rf_scan"] is False
     assert caps["rf_tool"] == "nmcli"  # tool is installed but no iface
     assert caps["wifi_iface"] is None
+    assert caps["dhcp_test_iface"] == "eth0"
     assert caps["association_test"] is False
 
 

@@ -184,6 +184,7 @@ services:
       - TENANT_ID=${TENANT_ID}
       - HEARTBEAT_INTERVAL=30
       - GIT_SHA=${GIT_SHA:-unknown}
+      - DHCP_TEST_IFACE=${DHCP_TEST_IFACE:-}
     volumes:
       - ./d2-agent/d2-internal-root.crt:/usr/local/share/ca-certificates/d2-internal-root.crt:ro
       - ./d2-agent/buffer:/app/buffer
