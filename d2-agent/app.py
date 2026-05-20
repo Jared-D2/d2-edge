@@ -1412,11 +1412,20 @@ def run_mtu_test(target: str, max_size: int = 1500) -> dict:
             "raw": f"pmtu={best}", "attempts": attempts}
 
 def run_dhcp_test(interface: str = "eth0") -> dict:
-    """DHCP DORA timing test using AF_PACKET raw Ethernet.
+    """DHCP offer-latency probe (Discover-only) using AF_PACKET raw Ethernet.
 
-    Sends a DHCP Discover with a locally-administered fake MAC, waits for
-    Offer, sends Request, waits for ACK, then sends Release.  Uses raw
-    AF_PACKET sockets — no macvlan or dhclient needed. Requires CAP_NET_RAW.
+    Sends a DHCP Discover from the interface's REAL MAC and measures the time
+    to the server's Offer, then STOPS — it never sends Request/ACK, so the
+    interface's live lease is never claimed, renewed, or disturbed.
+
+    Why the real MAC: networks with DHCP snooping, switch port-security
+    (max MACs per port), or MAC-reservation-only scopes silently ignore
+    Discovers from unknown synthetic MACs. Observed on d2001 — Discovers from a
+    random `02:xx` MAC egressed but drew zero Offers, even in promiscuous
+    capture, while a Discover from the real MAC is answered in ~1.4ms. Using the
+    real MAC makes the probe work on managed networks; Discover-only keeps it
+    side-effect free. Uses raw AF_PACKET sockets — no dhclient. Requires
+    CAP_NET_RAW.
     """
     import struct
     import secrets
@@ -1432,10 +1441,20 @@ def run_dhcp_test(interface: str = "eth0") -> dict:
         "lease_s": None,
         "server_ip": None,
         "error": None,
+        "mode": "discover_only_real_mac",
     }
 
-    # Locally-administered unicast MAC (bit1 of first octet set, bit0 clear)
-    fake_mac = bytes([0x02]) + secrets.token_bytes(5)
+    # Use the interface's REAL MAC — the network already trusts it (the host
+    # holds a working lease on it). A throwaway MAC gets filtered by DHCP
+    # snooping / port security on managed networks.
+    try:
+        with open("/sys/class/net/%s/address" % interface) as _f:
+            client_mac = bytes.fromhex(_f.read().strip().replace(":", ""))
+        if len(client_mac) != 6:
+            raise ValueError("unexpected MAC length")
+    except Exception as e:
+        result["error"] = "could not read interface MAC: %s" % e
+        return result
     xid = int.from_bytes(secrets.token_bytes(4), "big")
 
     def ip_checksum(data: bytes) -> int:
@@ -1466,12 +1485,12 @@ def run_dhcp_test(interface: str = "eth0") -> dict:
         struct.pack_into("!I", msg, 4, xid)
         if msg_type != 7:  # Release has no response — broadcast flag irrelevant and wrong
             struct.pack_into("!H", msg, 10, 0x8000)
-        msg[28:34] = fake_mac
+        msg[28:34] = client_mac
         if msg_type == 7 and offered_ip:  # RFC 2131: ciaddr must be set in Release
             msg[12:16] = socket.inet_aton(offered_ip)
         dhcp = bytes(msg) + b"\x63\x82\x53\x63"
         dhcp += bytes([53, 1, msg_type])
-        dhcp += bytes([61, 7, 1]) + fake_mac
+        dhcp += bytes([61, 7, 1]) + client_mac
         if msg_type == 3:
             dhcp += bytes([50, 4]) + socket.inet_aton(offered_ip)
             dhcp += bytes([54, 4]) + socket.inet_aton(server_ip)
@@ -1531,11 +1550,11 @@ def run_dhcp_test(interface: str = "eth0") -> dict:
 
         t0 = time.monotonic()
 
-        disc = build_ethernet(fake_mac, build_ipv4(build_udp(68, 67, build_dhcp(1))))
+        disc = build_ethernet(client_mac, build_ipv4(build_udp(68, 67, build_dhcp(1))))
         sock.send(disc)
         t_disc = time.monotonic()
 
-        offered_ip = server_ip_str = None
+        offered_ip = server_ip_str = offer_lease = None
         t_offer = None
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -1545,6 +1564,7 @@ def run_dhcp_test(interface: str = "eth0") -> dict:
                 if parsed and parsed["msg_type"] == 2:
                     offered_ip = parsed["yiaddr"]
                     server_ip_str = parsed["server_id"]
+                    offer_lease = parsed.get("lease_time")
                     t_offer = time.monotonic()
                     result["discover_ms"] = round((t_offer - t_disc) * 1000, 2)
                     break
@@ -1555,48 +1575,17 @@ def run_dhcp_test(interface: str = "eth0") -> dict:
             result["error"] = "No DHCP Offer received within 10s"
             return result
 
-        req = build_ethernet(fake_mac, build_ipv4(
-            build_udp(68, 67, build_dhcp(3, offered_ip, server_ip_str or "0.0.0.0"))))
-        sock.send(req)
-        t_req = time.monotonic()
-
-        t_ack = lease_s = None
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            try:
-                frame, _ = sock.recvfrom(2048)
-                parsed = parse_dhcp(frame)
-                if parsed and parsed["msg_type"] == 5:
-                    t_ack = time.monotonic()
-                    lease_s = parsed.get("lease_time")
-                    break
-                elif parsed and parsed["msg_type"] == 6:
-                    result["error"] = "DHCP NAK received"
-                    return result
-            except socket.timeout:
-                break
-
-        if not t_ack:
-            result["error"] = "No DHCP ACK received within 10s"
-            return result
-
-        try:
-            srv = server_ip_str or "255.255.255.255"
-            rel = build_ethernet(fake_mac, build_ipv4(
-                build_udp(68, 67, build_dhcp(7, offered_ip, srv)),
-                src=socket.inet_aton(offered_ip),
-                dst=socket.inet_aton(srv)))
-            sock.send(rel)
-        except Exception:
-            pass
-
+        # Discover-only: we measured the server's offer latency. We deliberately
+        # do NOT send a Request/ACK, so the offer is left unclaimed and the
+        # interface's live lease is never touched. Offer latency is the headline
+        # timing; total_ms mirrors it (there is no Request/ACK round-trip).
         result.update({
             "success": True,
             "offered_ip": offered_ip,
             "server_ip": server_ip_str,
-            "lease_s": lease_s,
-            "ack_ms": round((t_ack - t_req) * 1000, 2),
-            "total_ms": round((t_ack - t0) * 1000, 2),
+            "lease_s": offer_lease,
+            "ack_ms": None,
+            "total_ms": round((t_offer - t0) * 1000, 2),
         })
 
     except PermissionError as e:
