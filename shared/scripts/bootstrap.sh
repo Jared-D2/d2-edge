@@ -21,7 +21,7 @@ echo "[1/8] Hostname setup..."
 # Rejects empty input and accidental paste of command syntax.
 HOSTNAME_RE='^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$'
 while true; do
-    read -rp "  Enter hostname for this Pi (e.g. d2-customer-site01): " NEW_HOSTNAME
+    read -rp "  Enter hostname for this Pi (e.g. d2-customer-site01): " NEW_HOSTNAME </dev/tty
     if [[ "$NEW_HOSTNAME" =~ $HOSTNAME_RE ]]; then
         break
     fi
