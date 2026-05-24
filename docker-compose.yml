@@ -159,6 +159,8 @@ services:
     profiles: ["${DEPLOY_D2_AGENT:-enabled}"]
     restart: unless-stopped
     network_mode: host
+    extra_hosts:
+      - "uxi.internal.d2tech.com.au:10.255.255.36"
     # NET_ADMIN is required for `iw dev wlan0 scan` (nl80211 netlink). Without
     # it, scans fail with EPERM and rf_scan capability reports false even
     # though wlan0 is detected. NET_RAW is not needed for iw-based scanning.

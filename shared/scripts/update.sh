@@ -73,6 +73,16 @@ else
 fi
 echo "  OK ($SHA)"
 
+# Migrate legacy IP-based CONTROLLER_URL to the hostname form. The controller
+# cert is hostname-based (uxi.internal.d2tech.com.au); the IP SAN is being
+# retired. extra_hosts on the d2-agent service maps the name -> 10.255.255.36
+# so resolution works without fleet DNS. Idempotent: only rewrites the exact
+# legacy IP URL, leaves anything else (already-migrated, lab overrides) alone.
+if [[ -f "$EDGE_DIR/.env" ]] && grep -q '^CONTROLLER_URL=wss://10\.255\.255\.36:9000/ws/agent' "$EDGE_DIR/.env"; then
+    sed -i 's|^CONTROLLER_URL=wss://10\.255\.255\.36:9000/ws/agent|CONTROLLER_URL=wss://uxi.internal.d2tech.com.au:9000/ws/agent|' "$EDGE_DIR/.env"
+    echo "  migrated CONTROLLER_URL to hostname (uxi.internal.d2tech.com.au)"
+fi
+
 echo
 echo "[2/6] Validating .env and host state..."
 bash "$EDGE_DIR/shared/scripts/preflight.sh"
