@@ -110,6 +110,14 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-auvik-watchdog.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-auvik-watchdog.sh"
 fi
+
+# Ansible service account: idempotent provision of svc_ansible (sudo limited
+# to THIS update.sh, key locked to the Ansible control node 192.168.166.3).
+# Self-arms on every update so new Pis are Ansible-manageable with no manual
+# setup -- mirrors the auvik-watchdog / oxidized-proxy heals above.
+if [[ -x "$EDGE_DIR/scripts/setup-svc-ansible.sh" ]]; then
+    bash "$EDGE_DIR/scripts/setup-svc-ansible.sh"
+fi
 echo "  OK"
 
 echo
