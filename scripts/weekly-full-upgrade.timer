@@ -1,0 +1,9 @@
+[Unit]
+Description=D2 weekly full apt upgrade (Saturday 01:00 Australia/Sydney)
+
+[Timer]
+OnCalendar=Sat *-*-* 01:00:00 Australia/Sydney
+Persistent=false
+
+[Install]
+WantedBy=timers.target

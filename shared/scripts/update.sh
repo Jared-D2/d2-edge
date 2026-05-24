@@ -118,6 +118,16 @@ fi
 if [[ -x "$EDGE_DIR/scripts/setup-svc-ansible.sh" ]]; then
     bash "$EDGE_DIR/scripts/setup-svc-ansible.sh"
 fi
+# Weekly full-upgrade timer: idempotent install of the systemd timer that
+# runs `apt full-upgrade` (all repos incl third-party Docker/Tailscale)
+# every Saturday 01:00 Australia/Sydney and schedules a 02:00 reboot if one
+# is required. Daily unattended-upgrades stays security-only (52 drop-in);
+# this is the weekly catch-up for non-security + third-party packages that
+# the security-only daily policy never touches. Added 2026-05-24, see
+# project_auto_patch_reboot.md.
+if [[ -x "$EDGE_DIR/scripts/install-weekly-upgrade.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-weekly-upgrade.sh"
+fi
 echo "  OK"
 
 echo

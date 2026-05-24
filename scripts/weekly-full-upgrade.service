@@ -1,0 +1,11 @@
+[Unit]
+Description=D2 weekly full apt upgrade (all repos incl third-party)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=DEBIAN_FRONTEND=noninteractive
+ExecStartPre=-/usr/bin/apt-get update -q
+ExecStart=/usr/bin/apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
+ExecStartPost=/bin/sh -c 'if [ -f /var/run/reboot-required ]; then /usr/sbin/shutdown -r 02:00 "D2 weekly maintenance reboot"; fi'
