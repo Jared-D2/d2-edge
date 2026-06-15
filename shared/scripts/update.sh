@@ -138,6 +138,14 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-weekly-upgrade.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-weekly-upgrade.sh"
 fi
+# Wi-Fi sensing radio: idempotent passive enable for RF-capable sensor Pis.
+# d2-agent scans wlan0 but never brings the radio up; the enablement was a
+# manual imaging step never captured here, so sites shipped soft-blocked
+# (ENETDOWN every ap_scan -> standing sensor_health incident). No-op on
+# wired-only Pis; NEVER associates. See nib001-mu-pi01 / ncm001-bc-pi01.
+if [[ -x "$EDGE_DIR/scripts/enable-rf-radio.sh" ]]; then
+    bash "$EDGE_DIR/scripts/enable-rf-radio.sh"
+fi
 echo "  OK"
 
 echo
