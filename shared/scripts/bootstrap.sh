@@ -40,8 +40,35 @@ echo "  Hostname: ${OLD_HOSTNAME} -> ${NEW_HOSTNAME} (also in /etc/hosts)"
 
 # ─── System update ────────────────────────────────────────────────────────
 echo ""
+# apt-get update can exit 0 with an empty/corrupt package index (truncated
+# Packages files in /var/lib/apt/lists from an interrupted run, masked by an
+# InRelease "Hit"). A zero exit code is NOT proof the index is usable, so we
+# canary on a package that must exist (git, in Debian main) and self-heal by
+# rebuilding the lists before giving up.
+apt_update_verified() {
+    apt-get update
+    if apt-cache policy git 2>/dev/null | grep -q "Candidate: [0-9]"; then
+        return 0
+    fi
+    echo "  apt index empty after update (git unresolvable) - rebuilding lists..." >&2
+    rm -rf /var/lib/apt/lists/*
+    apt-get update
+    if apt-cache policy git 2>/dev/null | grep -q "Candidate: [0-9]"; then
+        echo "  Recovered: apt index rebuilt." >&2
+        return 0
+    fi
+    echo "ERROR: apt cannot resolve packages even after rebuilding the index." >&2
+    echo "  arch: $(dpkg --print-architecture)" >&2
+    echo "  --- apt sources ---" >&2
+    grep -rhsE "^(URIs|Suites|Components):" /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null >&2
+    echo "  --- apt-cache stats ---" >&2
+    apt-cache stats 2>/dev/null | head -3 >&2
+    echo "  Likely: clock skew (date), DNS, or 'main' missing from Components above." >&2
+    exit 1
+}
+
 echo "[2/8] Updating system packages + removing desktop bloat..."
-apt-get update -qq
+apt_update_verified
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
 # Remove desktop browsers — not needed on a headless edge appliance.
 # Keeps the SD card lean and shrinks the attack surface.
@@ -52,7 +79,7 @@ echo "  OK"
 # ─── Install dependencies ─────────────────────────────────────────────────
 echo ""
 echo "[3/8] Installing dependencies..."
-apt-get install -y -qq     curl git nano chrony logrotate ca-certificates     gnupg lsb-release apt-transport-https     ufw fail2ban unattended-upgrades     snmp lldpd
+apt-get install -y     curl git nano chrony logrotate ca-certificates     gnupg lsb-release apt-transport-https     ufw fail2ban unattended-upgrades     snmp lldpd
 echo "  OK"
 
 # ─── Install Docker ───────────────────────────────────────────────────────
