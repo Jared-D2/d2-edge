@@ -175,6 +175,11 @@ export COMPOSE_PROFILES=enabled
 # tailnet — which has locked us out of fleet Pis remotely in the past.
 # Plain `up -d` on tailscale still recreates it if docker-compose.yml
 # itself changed, which is the only case where a restart is warranted.
+# Tenant-mismatch guard: reset stale auvik identity before (re)creating the
+# collector so a cloned/re-tenanted Pi registers into the correct tenant.
+if [[ -x "$EDGE_DIR/scripts/auvik-ensure-tenant.sh" ]]; then
+    bash "$EDGE_DIR/scripts/auvik-ensure-tenant.sh" || true
+fi
 docker compose up -d --force-recreate \
     auvik cert-server d2-agent freeradius-proxy netflow-proxy \
     syslog-proxy zabbix-agent2 zabbix-proxy
