@@ -45,25 +45,40 @@ echo ""
 # InRelease "Hit"). A zero exit code is NOT proof the index is usable, so we
 # canary on a package that must exist (git, in Debian main) and self-heal by
 # rebuilding the lists before giving up.
+#
+# Resolvability is read from git's version-table REPOSITORY line
+# (e.g. "  500 http://deb.debian.org/debian trixie/main arm64 Packages"),
+# never the "Candidate: <ver>" line. Matching "Candidate: [0-9]" false-negates
+# on a perfectly healthy index because of: version epochs (git is "1:2.x"),
+# non-English locales (apt translates the word "Candidate"), and git already
+# being installed (Candidate is then served from /var/lib/dpkg/status, not a
+# repo). A "<priority> http(s)://" line only appears when a repo actually
+# offers the package, so it is the true positive-resolvability signal.
+apt_git_resolvable() {
+    apt-cache policy git 2>/dev/null | grep -qE '[0-9]+[[:space:]]+https?://'
+}
+
 apt_update_verified() {
     apt-get update
-    if apt-cache policy git 2>/dev/null | grep -q "Candidate: [0-9]"; then
-        return 0
-    fi
+    apt_git_resolvable && return 0
     echo "  apt index empty after update (git unresolvable) - rebuilding lists..." >&2
     rm -rf /var/lib/apt/lists/*
     apt-get update
-    if apt-cache policy git 2>/dev/null | grep -q "Candidate: [0-9]"; then
+    if apt_git_resolvable; then
         echo "  Recovered: apt index rebuilt." >&2
         return 0
     fi
     echo "ERROR: apt cannot resolve packages even after rebuilding the index." >&2
     echo "  arch: $(dpkg --print-architecture)" >&2
     echo "  --- apt sources ---" >&2
-    grep -rhsE "^(URIs|Suites|Components):" /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null >&2
+    # Handle both deb822 (.sources: URIs/Suites/Components) and legacy one-line
+    # (.list / sources.list: "deb http://...") formats; a Pi using only the
+    # legacy format would otherwise print an empty source list here.
+    grep -rhsE "^(deb |deb-src |Types:|URIs:|Suites:|Components:)" \
+        /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null >&2
     echo "  --- apt-cache stats ---" >&2
     apt-cache stats 2>/dev/null | head -3 >&2
-    echo "  Likely: clock skew (date), DNS, or 'main' missing from Components above." >&2
+    echo "  Likely: clock skew (date), DNS, or 'main' missing from sources above." >&2
     exit 1
 }
 
