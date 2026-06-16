@@ -138,6 +138,14 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-weekly-upgrade.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-weekly-upgrade.sh"
 fi
+# Firewall heal: open the netflow-proxy relay's sFlow/IPFIX ports (6343/4739)
+# on Pis bootstrapped before those listeners existed. bootstrap.sh sets UFW
+# up only once and update.sh historically never touched it, so the relay's
+# 6343/4739 inbound stayed dropped on existing Pis. Idempotent + additive
+# (never resets/deletes — no SSH-lockout risk). Closes REVIEW.md R1.
+if [[ -x "$EDGE_DIR/scripts/heal-firewall.sh" ]]; then
+    bash "$EDGE_DIR/scripts/heal-firewall.sh"
+fi
 echo "  OK"
 
 echo

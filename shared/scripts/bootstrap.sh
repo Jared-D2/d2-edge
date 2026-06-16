@@ -106,9 +106,19 @@ ufw allow 10021/tcp comment 'Auvik' >/dev/null
 ufw allow 1812/udp comment 'RADIUS auth' >/dev/null
 ufw allow 1813/udp comment 'RADIUS acct' >/dev/null
 ufw allow 5201/tcp comment 'iperf3 P2P' >/dev/null
-ufw allow 9995/udp comment 'Auvik NetFlow' >/dev/null
-ufw allow 9996/udp comment 'Auvik sFlow' >/dev/null
-ufw allow 2055/udp comment 'Auvik NetFlow (legacy)' >/dev/null
+# Flow telemetry ingress (UDP). The netflow-proxy container (nginx stream,
+# host network) binds 2055/NetFlow, 6343/sFlow and 4739/IPFIX and relays each
+# datagram to the central goflow2 collector (NETFLOW_COLLECTOR_HOST). All
+# three MUST be open or non-NetFlow exporters are silently dropped at the
+# firewall before reaching the relay. 9995/9996 are Auvik TrafficInsights'
+# own flow ports (kept for Auvik; the relay does not listen on them).
+# NOTE: .env isn't populated yet at this point in bootstrap, so these open
+# unconditionally; the netflow profile gate is applied by the update.sh heal.
+ufw allow 2055/udp comment 'Flow: NetFlow -> netflow-proxy relay' >/dev/null
+ufw allow 6343/udp comment 'Flow: sFlow -> netflow-proxy relay' >/dev/null
+ufw allow 4739/udp comment 'Flow: IPFIX -> netflow-proxy relay' >/dev/null
+ufw allow 9995/udp comment 'Flow: Auvik TrafficInsights (NetFlow)' >/dev/null
+ufw allow 9996/udp comment 'Flow: Auvik TrafficInsights (sFlow)' >/dev/null
 ufw allow from 192.168.0.0/16 to any port 80 proto tcp comment 'cert-server (LAN onboarding)' >/dev/null
 ufw allow from 192.168.0.0/16 to any port 2083 proto tcp comment 'RadSec from customer devices' >/dev/null
 echo "y" | ufw enable >/dev/null
