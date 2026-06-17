@@ -199,7 +199,10 @@ services:
 
   # ─── Zabbix agent 2 ───────────────────────────────────────────────────────
   zabbix-agent2:
-    image: zabbix/zabbix-agent2:ubuntu-7.4-latest
+    # Pinned by digest (multi-arch manifest list, incl. arm64). To re-pin when
+    # bumping the tag: docker manifest inspect zabbix/zabbix-agent2:<new-tag>
+    # and update the digest below to the top-level manifest-list digest.
+    image: zabbix/zabbix-agent2:ubuntu-7.4-latest@sha256:51960599a3e803797b614f085fa5fd7dd6135e669990fe45c0e4d5c9c39b0e4b
     container_name: zabbix-agent2
     profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped
@@ -261,7 +264,10 @@ services:
   # 192.168.166.34 → d2001). nginx.conf is rendered by render-configs.sh
   # from netflow-proxy/nginx.conf.template.
   netflow-proxy:
-    image: nginx:1.27-alpine
+    # Pinned by digest (multi-arch manifest list, incl. arm64). To re-pin when
+    # bumping the tag: docker manifest inspect nginx:<new-tag> and update the
+    # digest below to the top-level manifest-list digest.
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     container_name: netflow-proxy
     profiles: ["${DEPLOY_NETFLOW_PROXY:-enabled}"]
     hostname: netflow-proxy
