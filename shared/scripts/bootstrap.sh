@@ -100,29 +100,70 @@ echo "  SSH: X11 disabled, MaxAuthTries=3"
 ufw --force reset >/dev/null 2>&1
 ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
-ufw allow 22/tcp comment 'SSH' >/dev/null
-ufw allow 514 comment 'Syslog' >/dev/null
-ufw allow 10021/tcp comment 'Auvik' >/dev/null
-ufw allow 1812/udp comment 'RADIUS auth' >/dev/null
-ufw allow 1813/udp comment 'RADIUS acct' >/dev/null
-ufw allow 5201/tcp comment 'iperf3 P2P' >/dev/null
-# Flow telemetry ingress (UDP). The netflow-proxy container (nginx stream,
-# host network) binds 2055/NetFlow, 6343/sFlow and 4739/IPFIX and relays each
-# datagram to the central goflow2 collector (NETFLOW_COLLECTOR_HOST). All
-# three MUST be open or non-NetFlow exporters are silently dropped at the
-# firewall before reaching the relay. 9995/9996 are Auvik TrafficInsights'
-# own flow ports (kept for Auvik; the relay does not listen on them).
-# NOTE: .env isn't populated yet at this point in bootstrap, so these open
-# unconditionally; the netflow profile gate is applied by the update.sh heal.
-ufw allow 2055/udp comment 'Flow: NetFlow -> netflow-proxy relay' >/dev/null
-ufw allow 6343/udp comment 'Flow: sFlow -> netflow-proxy relay' >/dev/null
-ufw allow 4739/udp comment 'Flow: IPFIX -> netflow-proxy relay' >/dev/null
-ufw allow 9995/udp comment 'Flow: Auvik TrafficInsights (NetFlow)' >/dev/null
-ufw allow 9996/udp comment 'Flow: Auvik TrafficInsights (sFlow)' >/dev/null
-ufw allow from 192.168.0.0/16 to any port 80 proto tcp comment 'cert-server (LAN onboarding)' >/dev/null
-ufw allow from 192.168.0.0/16 to any port 2083 proto tcp comment 'RadSec from customer devices' >/dev/null
+
+# ── Source-scoped ingress ────────────────────────────────────────────────
+# Nothing is exposed to "Anywhere". Every service is pinned to a trusted
+# source zone so a hostile upstream (the customer WAN side, a misrouted
+# public range) can't reach SSH or the device-facing collectors. Two zones:
+#   TAILNET  — the Tailscale overlay (CGNAT 100.64.0.0/10). Admin + Pi<->Pi.
+#   RFC1918  — the local customer LAN this appliance sits on. Device-facing.
+# Most ports are both admin- and device-facing, so they take both zones.
+# Carve-outs:
+#   5201/iperf3 — TAILNET ONLY (Pi-to-Pi throughput tests over the overlay;
+#                 never needs to answer a customer-LAN device).
+#   10021/Auvik — RFC1918 ONLY (FTP/21 remapped to 10021; device-facing
+#                 config/firmware backup push, no admin/tailnet need).
+# scripts/heal-firewall.sh mirrors these EXACT rules additively onto
+# already-deployed Pis (Phase A) — keep the two in sync. IPv4 CIDRs mean no
+# "(v6)" rule twins, which dovetails with scripts/disable-ipv6.sh.
+TAILNET=(100.64.0.0/10)
+RFC1918=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16)
+DEVICE_FACING=("${TAILNET[@]}" "${RFC1918[@]}")
+
+# allow_scoped <port> <proto|any> <comment> <src>...
+# Emits one `ufw allow from <src> to any port <port> [proto <proto>]` per src.
+allow_scoped() {
+    local port="$1" proto="$2" comment="$3"; shift 3
+    local src
+    for src in "$@"; do
+        if [[ "$proto" == "any" ]]; then
+            ufw allow from "$src" to any port "$port" \
+                comment "$comment" >/dev/null
+        else
+            ufw allow from "$src" to any port "$port" proto "$proto" \
+                comment "$comment" >/dev/null
+        fi
+    done
+}
+
+# Admin + device-facing services: tailnet + local LAN.
+allow_scoped 22   tcp 'SSH'                          "${DEVICE_FACING[@]}"
+allow_scoped 514  any 'Syslog'                       "${DEVICE_FACING[@]}"
+allow_scoped 1812 udp 'RADIUS auth'                  "${DEVICE_FACING[@]}"
+allow_scoped 1813 udp 'RADIUS acct'                  "${DEVICE_FACING[@]}"
+# cert-server onboarding + RadSec. Supersedes the old hardcoded
+# 192.168.0.0/16-only rules (REVIEW.md C6) — tailnet+RFC1918 also covers
+# 10.x / 172.16.x sites that the /16 rule firewalled out.
+allow_scoped 80   tcp 'cert-server (LAN onboarding)' "${DEVICE_FACING[@]}"
+allow_scoped 2083 tcp 'RadSec from customer devices' "${DEVICE_FACING[@]}"
+# Flow telemetry ingress. 2055/6343/4739 -> netflow-proxy relay (nginx stream,
+# host network) -> central goflow2 (NETFLOW_COLLECTOR_HOST); all three MUST be
+# open or non-NetFlow exporters are dropped before reaching the relay.
+# 9995/9996 are Auvik TrafficInsights' own ports. .env isn't populated yet at
+# this point, so these open unconditionally; the netflow-proxy profile gate is
+# applied by the update.sh heal.
+allow_scoped 2055 udp 'Flow: NetFlow -> netflow-proxy relay'  "${DEVICE_FACING[@]}"
+allow_scoped 6343 udp 'Flow: sFlow -> netflow-proxy relay'    "${DEVICE_FACING[@]}"
+allow_scoped 4739 udp 'Flow: IPFIX -> netflow-proxy relay'    "${DEVICE_FACING[@]}"
+allow_scoped 9995 udp 'Flow: Auvik TrafficInsights (NetFlow)' "${DEVICE_FACING[@]}"
+allow_scoped 9996 udp 'Flow: Auvik TrafficInsights (sFlow)'   "${DEVICE_FACING[@]}"
+# iperf3 — CARVE-OUT: TAILNET ONLY.
+allow_scoped 5201 tcp 'iperf3 P2P (tailnet only)'    "${TAILNET[@]}"
+# Auvik FTP-backup ingress (FTP/21 -> 10021) — CARVE-OUT: RFC1918 ONLY.
+allow_scoped 10021 tcp 'Auvik FTP-backup (RFC1918)'  "${RFC1918[@]}"
+
 echo "y" | ufw enable >/dev/null
-echo "  UFW: enabled with service rules"
+echo "  UFW: enabled, source-scoped (tailnet + RFC1918; iperf=tailnet, Auvik=RFC1918)"
 
 # fail2ban
 cat > /etc/fail2ban/jail.local << 'F2B'
