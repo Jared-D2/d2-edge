@@ -31,6 +31,22 @@ Docker / docker-compose, ufw, systemd, nginx, FreeRADIUS, syslog-ng, GitHub Acti
 **Branching:** one branch + PR per task, e.g. `fix/netflow-firewall-ports`. Do **not**
 push to `main`. Keep PRs small so Codex can review each in isolation.
 
+**PR hygiene:** before opening any PR, confirm it is based on current `origin/main` and that
+the PR diff contains only the intended files:
+
+```bash
+git fetch origin
+git diff --name-status origin/main...HEAD
+git log --oneline --decorate origin/main..HEAD
+```
+
+For this docs-review PR, the expected diff is only:
+
+```
+A	docs/reviews/PLAN.md
+A	docs/reviews/REVIEW.md
+```
+
 **Running the Python tests** (Linux dev box, CI, or the Pi host — host Python is 3.13,
 container is 3.12; either runs the suite):
 
@@ -184,7 +200,7 @@ git commit -m "refactor(agent): remove dead _run_dhcp_test_helper"
 
 ---
 
-## Task 2: Re-validate redirect target in `run_http_test` (S4 — SSRF defense-in-depth)
+## Task 2: Validate every redirect target before following it in `run_http_test` (S4 — SSRF defense-in-depth)
 
 **Files:** Modify `d2-agent/app.py` (`run_http_test`, ~lines 1814-1849);
 Modify `d2-agent/tests/test_security.py`.
@@ -194,34 +210,60 @@ Modify `d2-agent/tests/test_security.py`.
 with no SSRF check. Real-world impact on a LAN Pi is low (no cloud metadata; loopback
 agent API is auth-gated) but the code comments claim rebinding protection it doesn't
 provide across redirects, and `http`/`zoom_test` steps hit controller-supplied URLs.
+Important: validating `url_effective` **after** `curl -L` returns is too late; the
+redirect target has already been requested. The agent must validate each `Location` host
+before issuing the next request.
 
 - [ ] **Step 1: Write failing tests** — append to `tests/test_security.py`:
 
 ```python
 class TestHttpRedirectSsrf:
-    def _curl_output(self, url_final):
+    def _curl_output(self, http_code=200, url_final="http://safe.example.com",
+                     redirect_url=""):
         return ("dns_s=0.01\nconnect_s=0.02\ntls_s=0.0\nttfb_s=0.05\n"
-                "total_s=0.06\nhttp_code=200\nredirect_count=1\n"
+                "total_s=0.06\n"
+                f"http_code={http_code}\nredirect_url={redirect_url}\n"
                 f"size_bytes=10\nurl_final={url_final}\n")
 
     def test_redirect_to_metadata_is_rejected(self, monkeypatch):
         monkeypatch.setattr(app.socket, "getaddrinfo",
                             lambda *_a, **_k: [(0, 0, 0, "", ("203.0.113.5", 0))])
-        monkeypatch.setattr(app, "run_cmd",
-                            lambda cmd, timeout=60: (True, self._curl_output(
-                                "http://169.254.169.254/latest/meta-data/")))
+
+        calls = []
+        def fake_run_cmd(cmd, timeout=60):
+            calls.append(cmd)
+            return True, self._curl_output(
+                http_code=302,
+                url_final="http://safe.example.com",
+                redirect_url="http://169.254.169.254/latest/meta-data/")
+        monkeypatch.setattr(app, "run_cmd", fake_run_cmd)
+
         r = app.run_http_test("http://safe.example.com")
         assert r["success"] is False
         assert "blocked" in r["error"].lower()
+        assert len(calls) == 1  # did not request the blocked redirect target
 
     def test_same_host_redirect_is_allowed(self, monkeypatch):
         monkeypatch.setattr(app.socket, "getaddrinfo",
                             lambda *_a, **_k: [(0, 0, 0, "", ("203.0.113.5", 0))])
-        monkeypatch.setattr(app, "run_cmd",
-                            lambda cmd, timeout=60: (True, self._curl_output(
-                                "https://safe.example.com/landing")))
+
+        calls = []
+        def fake_run_cmd(cmd, timeout=60):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return True, self._curl_output(
+                    http_code=302,
+                    url_final="https://safe.example.com",
+                    redirect_url="https://safe.example.com/landing")
+            return True, self._curl_output(
+                http_code=200,
+                url_final="https://safe.example.com/landing")
+        monkeypatch.setattr(app, "run_cmd", fake_run_cmd)
+
         r = app.run_http_test("https://safe.example.com")
         assert r["success"] is True
+        assert r["url_final"] == "https://safe.example.com/landing"
+        assert len(calls) == 2
 ```
 
 - [ ] **Step 2: Run — expect the metadata test to FAIL**
@@ -229,46 +271,65 @@ class TestHttpRedirectSsrf:
 Run: `AGENT_TOKEN=t .venv/bin/python -m pytest tests/test_security.py::TestHttpRedirectSsrf -v`
 Expected: `test_redirect_to_metadata_is_rejected` FAILS (currently returns success).
 
-- [ ] **Step 3: Implement.** In `run_http_test`, (a) bound redirects, (b) re-validate the
-      final host. Change the follow-redirects line from:
+- [ ] **Step 3: Implement.** Replace curl auto-following with an explicit redirect loop.
+      First, make curl expose redirects without following them. In the `-w` string, add
+      `redirect_url=%{redirect_url}\n`, and remove `-L` entirely. Keep a max redirect
+      counter in Python instead of `--max-redirs`.
 
 ```python
-    if follow_redirects and not _looks_like_ip_literal(host):
-        cmd.append("-L")
+    max_redirects = 5 if follow_redirects else 0
+    current_url = url
+    redirects_followed = 0
+    visited = set()
 ```
 
-to:
+Then wrap the existing single-curl logic in a loop. Each iteration should:
 
 ```python
-    if follow_redirects and not _looks_like_ip_literal(host):
-        cmd += ["-L", "--max-redirs", "5"]
+    # Parse and validate the URL for this hop before curl runs.
+    parsed_url = urlparse(current_url)
+    current_host = parsed_url.hostname or ""
+    blocked, resolved_ip = _resolve_and_check(current_host)
+    if blocked:
+        return {"url": url, "success": False, "url_final": current_url,
+                "redirect_count": redirects_followed,
+                "error": "Redirect landed on a blocked host "
+                         "(metadata / loopback / link-local / unresolvable)"}
 ```
 
-Then, inside the `if ok:` block, **after** `result["url_final"] = parsed.get("url_final", url)`
-and before `result["success"] = result["http_code"] > 0`, insert:
+Build the curl command for `current_url`, using `--resolve` for the current hop's host/IP.
+After parsing curl output, inspect `http_code` and `redirect_url`:
 
 ```python
-        # Defense-in-depth: -L can follow a redirect to a host we never pinned
-        # (--resolve covers only the original host), so a 3xx to a blocked IP
-        # would be fetched unchecked. Re-validate the effective final host and
-        # fail closed if it landed on a blocked address.
-        final_url = result["url_final"] or url
-        try:
-            final_host = urlparse(final_url).hostname or ""
-        except Exception:
-            final_host = ""
-        if final_host and final_host.lower() != (host or "").lower():
-            final_blocked, _ = _resolve_and_check(final_host)
-            if final_blocked:
-                return {"url": url, "success": False, "url_final": final_url,
-                        "error": "Redirect landed on a blocked host "
-                                 "(metadata / loopback / link-local / unresolvable)"}
+    redirect_url = parsed.get("redirect_url", "")
+    if follow_redirects and result["http_code"] in {301, 302, 303, 307, 308} and redirect_url:
+        if redirects_followed >= max_redirects:
+            result["success"] = False
+            result["error"] = "Too many redirects"
+            return result
+        next_url = urljoin(current_url, redirect_url)
+        if next_url in visited:
+            result["success"] = False
+            result["error"] = "Redirect loop detected"
+            return result
+        visited.add(next_url)
+        current_url = next_url
+        redirects_followed += 1
+        continue
+    result["redirect_count"] = redirects_followed
+    result["url_final"] = current_url
+    result["success"] = result["http_code"] > 0
+    return result
 ```
+
+Add `urljoin` to the existing `urllib.parse` import if needed.
 
 - [ ] **Step 4: Run — expect PASS**
 
 Run: `AGENT_TOKEN=t .venv/bin/python -m pytest tests/test_security.py -v`
-Expected: PASS (both new tests + all existing).
+Expected: PASS (both new tests + all existing). Also inspect the captured command list in
+`test_redirect_to_metadata_is_rejected` and confirm no second curl call is made for the
+blocked host.
 
 - [ ] **Step 5: Commit**
 
@@ -277,10 +338,12 @@ git add d2-agent/app.py d2-agent/tests/test_security.py
 git commit -m "fix(agent): re-validate redirect target in run_http_test (SSRF defense-in-depth)"
 ```
 
-**Risk:** Low. Could reject a legitimate cross-host redirect that resolves to RFC1918
-(allowed) — but `_resolve_and_check` permits RFC1918, so only metadata/loopback/link-local
-final hosts are rejected. **Rollback:** revert commit. **Acceptance:** metadata-redirect
-rejected; same-host and public-host redirects still succeed.
+**Risk:** Low-Med. Replacing curl's redirect engine means relative `Location` headers,
+redirect loops, and 303 method changes need to be handled deliberately. This function only
+does GETs, so method rewrite is not a concern. `_resolve_and_check` permits RFC1918, so
+legitimate LAN redirects still work. **Rollback:** revert commit. **Acceptance:**
+metadata-redirect rejected before the second request; same-host, relative, and public-host
+redirects still succeed.
 
 ---
 
@@ -924,7 +987,7 @@ USER d2agent
 - [ ] **Step 2: Build**
 
 Run: `docker compose build d2-agent --pull`
-Run: `docker run --rm --cap-add NET_ADMIN --entrypoint sh d2-agent -c 'id && getcap "$(readlink -f "$(command -v python3)")"'`
+Run: `docker compose run --rm --entrypoint sh d2-agent -c 'id && getcap "$(readlink -f "$(command -v python3)")"'`
 Expected: non-root `uid=10001`, and `cap_net_admin,cap_net_bind_service,cap_net_raw=eip`.
 
 - [ ] **Step 3: Fix buffer mount ownership** (host side). The bind-mounted

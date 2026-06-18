@@ -34,8 +34,9 @@ S3 (Med) — docker group makes "least-privilege" svc_ansible (and admin) root-e
 S4 (Low-Med) — run_http_test follows redirects (-L) with only the initial host pinned → SSRF
   guard bypass on redirect. app.py:1818-1822. 3xx to another host re-resolves with no check.
   Low real impact on a LAN Pi (no cloud metadata; loopback API is auth-gated) but comments claim
-  protection not delivered across redirects. Fix: --max-redirs N + re-validate url_effective host
-  via _resolve_and_check (discard if blocked).
+  protection not delivered across redirects. Fix: do not auto-follow with curl -L; follow redirects
+  in agent code with a small redirect loop that validates each Location host via _resolve_and_check
+  before making the next request.
 
 S5 (Low-Med, robustness) — WebSocket command params not bounded server-side. handle_command
   app.py:2347-2431. REST clamps via Query(ge/le); WS path takes count/size/duration/streams/etc
