@@ -138,13 +138,26 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-weekly-upgrade.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-weekly-upgrade.sh"
 fi
-# Firewall heal: open the netflow-proxy relay's sFlow/IPFIX ports (6343/4739)
-# on Pis bootstrapped before those listeners existed. bootstrap.sh sets UFW
-# up only once and update.sh historically never touched it, so the relay's
-# 6343/4739 inbound stayed dropped on existing Pis. Idempotent + additive
-# (never resets/deletes — no SSH-lockout risk). Closes REVIEW.md R1.
+# Firewall heal: source-scope ingress to the Tailscale overlay + RFC1918 on
+# already-deployed Pis (bootstrap.sh emits the scoped posture on fresh
+# installs; this brings existing Pis up to it). Phase A ADDITIVELY adds the
+# scoped tailnet/RFC1918 rules (iperf=tailnet-only, Auvik=RFC1918-only,
+# flow-relay ports gated on DEPLOY_NETFLOW_PROXY). Phase B removes the legacy
+# broad "Anywhere" rules but ONLY when .env sets FIREWALL_DROP_ANYWHERE=yes
+# AND the scoped SSH rule is present — so this is lockout-safe to ship
+# fleet-wide before any box opts in. Never `ufw reset`. Closes REVIEW.md
+# R1 (sFlow/IPFIX relay ports) + C6 (80/2083 hardcoded to 192.168.0.0/16).
 if [[ -x "$EDGE_DIR/scripts/heal-firewall.sh" ]]; then
     bash "$EDGE_DIR/scripts/heal-firewall.sh"
+fi
+# IPv6 disable heal: install the sysctl drop-in, apply it live, and — only
+# once IPv6 is confirmed down on eth0 — set IPV6=no in /etc/default/ufw +
+# reload UFW so it stops emitting "(v6)" rule twins. Runs AFTER heal-firewall
+# so it also cleans up any v6 twin that the flow-port heal just created.
+# Idempotent + additive (never `ufw reset` — no SSH-lockout risk). The stack
+# is IPv4-only; see scripts/disable-ipv6.sh + shared/files/99-disable-ipv6.conf.
+if [[ -f "$EDGE_DIR/scripts/disable-ipv6.sh" ]]; then
+    bash "$EDGE_DIR/scripts/disable-ipv6.sh"
 fi
 echo "  OK"
 

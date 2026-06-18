@@ -237,6 +237,14 @@ if [[ -x "${EDGE_DIR}/scripts/setup-oxidized-proxy-user.sh" ]]; then
     bash "${EDGE_DIR}/scripts/setup-oxidized-proxy-user.sh"
 fi
 
+# Disable IPv6 (attack-surface reduction). Installs the sysctl drop-in,
+# applies it live, and — only once IPv6 is confirmed down on eth0 — sets
+# IPV6=no in /etc/default/ufw + reloads UFW so no "(v6)" rule twins remain.
+# Idempotent + additive (never `ufw reset`). See scripts/disable-ipv6.sh.
+if [[ -f "${EDGE_DIR}/scripts/disable-ipv6.sh" ]]; then
+    bash "${EDGE_DIR}/scripts/disable-ipv6.sh"
+fi
+
 
 # ─── Log rotation ─────────────────────────────────────────────────────────
 cat > /etc/logrotate.d/d2-edge-syslog << 'LOGROTATE'
