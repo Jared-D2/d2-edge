@@ -159,6 +159,12 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-radsec-cert-check.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-radsec-cert-check.sh"
 fi
+# RadSec cert scaffolding (lego): installs lego + per-Pi key + renew timer.
+# Self-arms everywhere but stays a no-op until the Pi key is registered with
+# acme-hook (gated enrollment via Ansible). See scripts/install-lego-radsec.sh.
+if [[ -x "$EDGE_DIR/scripts/install-lego-radsec.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-lego-radsec.sh"
+fi
 echo "  OK"
 
 echo
