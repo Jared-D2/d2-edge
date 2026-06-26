@@ -1,0 +1,36 @@
+#!/bin/bash
+# RadSec cert expiry monitor. Pushes days-left to Zabbix (trapper item
+# radsec.cert.daysleft; 2 triggers: warn <=10d, crit <=5d) + escalating syslog.
+# Fleet-safe: no-op (exit 0) on Pis that have no RadSec cert yet.
+set -uo pipefail
+CERT="${RADSEC_CERT:-/opt/d2-edge/freeradius-proxy/certs/radsec.crt}"
+WARN_DAYS="${RADSEC_WARN_DAYS:-10}"
+CRIT_DAYS="${RADSEC_CRIT_DAYS:-5}"
+TAG=radsec-cert-check
+ZBX_KEY=radsec.cert.daysleft
+
+[ -r "$CERT" ] || exit 0   # not a RadSec consumer (yet) -> stay silent
+
+end_str="$(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2)"
+end_epoch="$(date -d "$end_str" +%s)"
+now_epoch="$(date +%s)"
+if [ -n "${RADSEC_SIMULATE_DAYS:-}" ]; then days="$RADSEC_SIMULATE_DAYS"; else days="$(( (end_epoch - now_epoch) / 86400 ))"; fi
+cn="$(openssl x509 -in "$CERT" -noout -subject | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p')"
+base="radsec_cert host=$(hostname) cn=${cn:-unknown} days_left=${days} warn=${WARN_DAYS} crit=${CRIT_DAYS}"
+
+# Push to Zabbix (trapper -> LOCAL proxy; server-direct is rejected for proxy
+# hosts). Skip for simulated runs so tests never trip the real triggers.
+if [ -z "${RADSEC_SIMULATE_DAYS:-}" ]; then
+  docker exec zabbix-agent2 zabbix_sender -z 127.0.0.1 -p 10051 -s "$(hostname)" -k "$ZBX_KEY" -o "${days}" >/dev/null 2>&1 || true
+fi
+
+if   [ "$days" -le "$CRIT_DAYS" ]; then
+  logger -t "$TAG" -p daemon.crit    "${base} level=critical msg=\"RadSec cert expires in ${days}d - renewal failing\""
+  echo "CRITICAL: ${base}"; exit 2
+elif [ "$days" -le "$WARN_DAYS" ]; then
+  logger -t "$TAG" -p daemon.warning "${base} level=warning msg=\"RadSec cert expires in ${days}d - renewal overdue\""
+  echo "WARNING: ${base}"; exit 1
+else
+  logger -t "$TAG" -p daemon.info    "${base} level=ok"
+  echo "OK: ${base}"; exit 0
+fi

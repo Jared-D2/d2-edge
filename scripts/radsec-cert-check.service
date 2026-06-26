@@ -1,0 +1,5 @@
+[Unit]
+Description=Check RadSec cert days-to-expiry; alert via syslog + Zabbix
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/radsec-cert-check

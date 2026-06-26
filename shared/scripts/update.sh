@@ -146,6 +146,19 @@ fi
 if [[ -x "$EDGE_DIR/scripts/enable-rf-radio.sh" ]]; then
     bash "$EDGE_DIR/scripts/enable-rf-radio.sh"
 fi
+
+# Internal CA/DNS hosts pin: lego RadSec renewal resolves step-ca by name but
+# edge Pis can't reach CoreDNS on :53; without the /etc/hosts pin (cloud-init
+# wipes it on reboot) renewal fails silently and the cert expires (cost a
+# ~3-week silent expiry on d2001 2026-06-26).
+if [[ -x "$EDGE_DIR/scripts/ensure-internal-hosts.sh" ]]; then
+    bash "$EDGE_DIR/scripts/ensure-internal-hosts.sh"
+fi
+# RadSec cert-expiry monitor: daily check + 2 escalating Zabbix alerts so a
+# silent renewal failure can't expire unnoticed. No-op on Pis without a cert.
+if [[ -x "$EDGE_DIR/scripts/install-radsec-cert-check.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-radsec-cert-check.sh"
+fi
 echo "  OK"
 
 echo
