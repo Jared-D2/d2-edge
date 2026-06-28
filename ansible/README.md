@@ -1,14 +1,22 @@
 # RadSec Pi enrollment
 
 `scripts/install-lego-radsec.sh` (self-armed by `update.sh`) installs the lego
-scaffolding on every Pi but stays a **no-op until the Pi is enrolled**. Enrollment
-is the one step a Pi must NOT self-serve (it would let a compromised Pi mint certs
-for any internal name, incl. central), so it runs from the Ansible control node:
+scaffolding + generates the Pi's DNS-01 key, but the Pi gets NO cert until it is
+enrolled. Enrollment is two steps, split along the access boundaries:
 
-    ansible-playbook -i inventory ansible/enroll-radsec-pi.yml -l <pi_host> \
-        --extra-vars "zabbix_api_token=<dedicated-token>"
+1. **GATED -- CA admin, on ca-dns** (a Pi/.3 must not authorize itself to the CA):
+   get the Pi pubkey and register it:
 
-It registers the Pi's DNS-01 key with `acme-hook@ca-dns`, triggers first issuance
-(`lego run`), and creates the Zabbix cert-expiry item + 2 triggers. Renewal is then
-hands-off (the Pi's daily `lego-radsec.timer`). Validated by hand on `d2001-jh-pi01`
-2026-06-26 before being codified here.
+       ssh <pi> sudo cat /etc/lego/ssh_id.pub        # or read it from the play output
+       sudo /usr/local/sbin/register-radsec-pi.sh '<that pubkey line>'   # on ca-dns
+
+2. **Ansible from .3** (svc_ansible, one narrow sudo grant): issue the cert +
+   create the Zabbix cert-expiry item/triggers:
+
+       ansible-playbook -i inventory/netbox.yml ansible/enroll-radsec-pi.yml \
+           -l <pi> -e zabbix_api_token=<dedicated-token>
+
+The play prints the exact step-1 command (with the pubkey). Renewal afterwards is
+hands-off (the Pi daily `lego-radsec.timer`). To then send the Pi->central auth hop
+over RadSec, open the 3 firewall layers to `.13:2083` and set `RADSEC_UPSTREAM=true`
+in the Pi `.env`.

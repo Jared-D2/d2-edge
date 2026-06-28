@@ -16,8 +16,9 @@ if [[ -f "$F/d2tech-internal-root.crt" ]] && \
   update-ca-certificates >/dev/null
 fi
 
-install -d -m 0700 /etc/lego
+install -d -m 0755 /etc/lego
 [[ -f /etc/lego/ssh_id ]] || ssh-keygen -t ed25519 -N '' -C "lego-dns-hook@$(hostname)" -f /etc/lego/ssh_id >/dev/null
+[[ -f /etc/lego/ssh_id ]] && chmod 0600 /etc/lego/ssh_id
 
 for f in lego-dns-exec.sh lego-radsec-deploy.sh lego-radsec-renew.sh lego-radsec-enroll.sh; do
   install -m 0755 "$S/$f" "$SBIN/$f"

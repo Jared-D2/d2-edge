@@ -1,37 +1,24 @@
 ---
-# Enroll an edge Pi for RadSec -- the GATED step the git deployment deliberately
-# cannot self-serve (a Pi must not be able to authorize itself to the CA). Run
-# from the Ansible control node (.3). Pairs with scripts/install-lego-radsec.sh
-# (the self-arming, no-op-until-enrolled scaffolding shipped via update.sh).
+# Issue a RadSec cert on an enrolled edge Pi + set up its Zabbix monitoring.
+# Run from the control node (.3) as svc_ansible. Fits the least-priv model: the
+# ONLY privileged step is `sudo -n /usr/local/sbin/lego-radsec-enroll.sh` (granted
+# in scripts/setup-svc-ansible.sh). No broad become; .3 never touches the CA.
 #
-# This codifies the steps validated by hand on d2001-jh-pi01 (2026-06-26):
-#   register acme-hook key -> lego run (first issuance) -> Zabbix item+triggers.
+# PREREQUISITE -- the GATED step, done OFF .3: the Pi's DNS-01 key must already be
+# registered with acme-hook. The play prints the exact command; a CA admin runs
+# `ansible/register-radsec-pi.sh '<pubkey>'` on ca-dns. A Pi must not be able to
+# authorize itself to the CA, so this is deliberately not automatable from .3.
 #
-# Prerequisites:
-#   - target Pi has already run update.sh (so /etc/lego/ssh_id[.pub] + radsec.env exist)
-#   - control node can SSH ca-dns (10.255.255.244) with become (edit acme-hook keys)
-#   - zabbix_api_token set (a DEDICATED token, not a personal one) + zabbix_api_url
-#
-# Usage: ansible-playbook -i inventory ansible/enroll-radsec-pi.yml -l <pi_host>
-- name: Enroll edge Pi(s) for RadSec
+# Usage: ansible-playbook -i inventory/netbox.yml ansible/enroll-radsec-pi.yml \
+#          -l <pi> -e zabbix_api_token=<dedicated-token>
+- name: Issue RadSec cert + monitoring on enrolled Pi(s)
   hosts: "{{ target | default('radsec_pending') }}"
-  become: true
+  become: false
+  gather_facts: false
   vars:
-    ca_dns_host: "10.255.255.244"
-    acme_authorized_keys: /home/acme-hook/.ssh/authorized_keys
-    acme_forced_command: 'command="sudo /usr/local/sbin/lego-dns-hook.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty'
     zabbix_api_url: "https://10.255.255.4/api_jsonrpc.php"
-    # zabbix_api_token: provide via --extra-vars or vault
   tasks:
-    - name: Scaffolding present (update.sh has run)?
-      ansible.builtin.stat: { path: /etc/lego/ssh_id.pub }
-      register: legokey
-    - name: Fail if not provisioned yet
-      ansible.builtin.fail:
-        msg: "Run update.sh on {{ inventory_hostname }} first (lego scaffolding missing)."
-      when: not legokey.stat.exists
-
-    - name: Read the Pi DNS-01 pubkey + CERT_NAME
+    - name: Read the Pi DNS-01 pubkey + CERT_NAME (no privilege; /etc/lego is 0755)
       ansible.builtin.slurp: { src: "{{ item }}" }
       loop: [ /etc/lego/ssh_id.pub, /etc/lego/radsec.env ]
       register: reads
@@ -39,39 +26,27 @@
         pi_pubkey: "{{ reads.results[0].content | b64decode | trim }}"
         cert_name: "{{ (reads.results[1].content | b64decode).split('=')[1] | trim }}"
 
-    # --- THE GATE: authorize this Pi at the CA (idempotent, matched by key blob) ---
-    - name: Register Pi key with acme-hook on ca-dns
-      ansible.builtin.lineinfile:
-        path: "{{ acme_authorized_keys }}"
-        line: "{{ acme_forced_command }} {{ pi_pubkey }}"
-        regexp: "{{ pi_pubkey.split(' ')[1] }}"
-        owner: acme-hook
-        group: acme-hook
-        mode: "0600"
-      delegate_to: "{{ ca_dns_host }}"
+    - name: "GATED step (run on ca-dns as CA admin if not done yet)"
+      ansible.builtin.debug:
+        msg: "sudo /usr/local/sbin/register-radsec-pi.sh '{{ pi_pubkey }}'"
 
-    # --- first issuance (idempotent via creates:) ---
-    - name: First lego issuance
-      ansible.builtin.command:
-        cmd: /usr/local/sbin/lego-radsec-enroll.sh
-        creates: "/etc/lego/certificates/{{ cert_name }}.crt"
+    - name: First issuance (idempotent; skips if cert exists; needs the Pi registered)
+      ansible.builtin.command: sudo -n /usr/local/sbin/lego-radsec-enroll.sh
+      register: enroll
+      changed_when: "'Server responded with a certificate' in (enroll.stdout | default(''))"
+      failed_when: enroll.rc != 0
 
-    # --- Zabbix cert-expiry monitoring (item + 2 triggers); best-effort/idempotent ---
-    - name: Look up Zabbix hostid
+    - name: Zabbix hostid lookup
       ansible.builtin.uri:
         url: "{{ zabbix_api_url }}"
         method: POST
         validate_certs: false
         headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
         body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: host.get
-          params: { output: [hostid], filter: { host: ["{{ inventory_hostname }}"] } }
-          id: 1
+        body: { jsonrpc: "2.0", method: host.get, params: { output: [hostid], filter: { host: ["{{ inventory_hostname }}"] } }, id: 1 }
       register: zbx_host
       when: zabbix_api_token is defined
-    - name: Create Zabbix trapper item (ignore if exists)
+    - name: Zabbix trapper item (ignore if exists)
       ansible.builtin.uri:
         url: "{{ zabbix_api_url }}"
         method: POST
@@ -81,18 +56,11 @@
         body:
           jsonrpc: "2.0"
           method: item.create
-          params:
-            name: "RadSec cert days to expiry"
-            key_: "radsec.cert.daysleft"
-            hostid: "{{ zbx_host.json.result[0].hostid }}"
-            type: 2
-            value_type: 0
-            units: days
+          params: { name: "RadSec cert days to expiry", key_: "radsec.cert.daysleft", hostid: "{{ zbx_host.json.result[0].hostid }}", type: 2, value_type: 0, units: days }
           id: 2
-      register: zbx_item
       failed_when: false
       when: zabbix_api_token is defined and zbx_host.json.result | length > 0
-    - name: Create Zabbix triggers (warn <=10>5, high <=5; ignore if exist)
+    - name: Zabbix triggers warn<=10>5 + high<=5 (ignore if exist)
       ansible.builtin.uri:
         url: "{{ zabbix_api_url }}"
         method: POST
