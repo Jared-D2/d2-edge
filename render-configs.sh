@@ -121,7 +121,15 @@ FR_TPL="${EDGE_DIR}/freeradius-proxy/config/templates"
 FR_OUT="${EDGE_DIR}/freeradius-proxy/config/rendered"
 mkdir -p "$FR_OUT"
 for f in clients.conf proxy.conf default; do
-    envsubst < "$FR_TPL/${f}.template" > "$FR_OUT/$f"
+    src="$FR_TPL/${f}.template"
+    # Per-Pi opt-in: send the Pi->central AUTH hop over RadSec (TLS/2083) instead
+    # of plain UDP/1812. Gated on a RadSec cert being present (else freeradius
+    # fails to start). Acct stays UDP/1813. Set RADSEC_UPSTREAM=true in .env.
+    if [[ "$f" == "proxy.conf" && "${RADSEC_UPSTREAM:-false}" == "true" && -f "$RADSEC_CERTS_DIR/radsec.crt" ]]; then
+        src="$FR_TPL/proxy.conf.radsec.template"
+        echo "[freeradius] proxy->central auth: RadSec (RADSEC_UPSTREAM=true)"
+    fi
+    envsubst < "$src" > "$FR_OUT/$f"
     validate_rendered "$FR_OUT/$f" || exit 1
 done
 echo "[freeradius] rendered OK"
