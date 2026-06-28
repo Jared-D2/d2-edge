@@ -125,7 +125,7 @@ for f in clients.conf proxy.conf default; do
     # Per-Pi opt-in: send the Pi->central AUTH hop over RadSec (TLS/2083) instead
     # of plain UDP/1812. Gated on a RadSec cert being present (else freeradius
     # fails to start). Acct stays UDP/1813. Set RADSEC_UPSTREAM=true in .env.
-    if [[ "$f" == "proxy.conf" && "${RADSEC_UPSTREAM:-false}" == "true" && -f "$RADSEC_CERTS_DIR/radsec.crt" ]]; then
+    if [[ "$f" == "proxy.conf" && "${RADSEC_UPSTREAM:-false}" == "true" && -f "$RADSEC_CERTS_DIR/radsec.crt" && -f "$RADSEC_CERTS_DIR/radsec.key" && -f "$RADSEC_CERTS_DIR/ca-bundle.pem" ]]; then
         src="$FR_TPL/proxy.conf.radsec.template"
         echo "[freeradius] proxy->central auth: RadSec (RADSEC_UPSTREAM=true)"
     fi
