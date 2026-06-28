@@ -32,4 +32,12 @@ for f in lego-radsec.service lego-radsec.timer; do
 done
 systemctl daemon-reload
 systemctl enable --now lego-radsec.timer >/dev/null
+
+# UFW: let the on-site switch fetch the root CA (:80) and open RadSec (:2083).
+# bootstrap.sh sets these on fresh Pis; re-assert here so already-deployed Pis
+# pick them up via update.sh (idempotent; LAN-scoped). See feedback_pi_radsec_cert_lego_hygiene.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow from 192.168.0.0/16 to any port 80 proto tcp comment 'cert-server (LAN onboarding)' >/dev/null
+  ufw allow from 192.168.0.0/16 to any port 2083 proto tcp comment 'RadSec from customer devices' >/dev/null
+fi
 echo "lego-radsec scaffolding installed (CERT_NAME=$CERT_NAME)."
