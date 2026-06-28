@@ -1,0 +1,38 @@
+#!/bin/bash
+# d2-enroll <PI>  -- onboard an edge Pi for a RadSec cert end-to-end, from .3.
+#   1. scaffold (update.sh self-arms lego + generates the Pi key)
+#   2. register the Pi key with the CA (scoped radsec-enroll forced-command)
+#   3. issue the cert + create Zabbix cert-expiry monitoring
+# Install at /usr/local/bin/d2-enroll on the control node. Run as a sudo-capable
+# user (e.g. jaredc). Prereqs: Tailscale ACL tag:ansible -> 10.255.255.244:22,
+# and (optional) /home/svc_ansible/.config/zabbix.env with ZBX_TOKEN=<token>.
+set -euo pipefail
+PI="${1:?usage: d2-enroll <pi-hostname>}"
+A=/opt/ansible
+ENROLL_KEY=/home/svc_ansible/.ssh/id_radsec_enroll
+CA=10.255.255.244
+ZBX_ENV=/home/svc_ansible/.config/zabbix.env
+ans() { sudo -u svc_ansible bash -c "set -a; . /home/svc_ansible/.config/netbox.env; set +a; cd $A; $*"; }
+
+echo "[1/3] scaffolding $PI (update.sh self-arms lego)..."
+d2-deploy push "$PI"
+
+echo "[2/3] registering $PI key with the CA..."
+PUBKEY=$(ans "ansible -i inventory/netbox.yml '$PI' -m command -a 'cat /etc/lego/ssh_id.pub' -o 2>/dev/null" \
+         | grep -oE 'ssh-ed25519 [A-Za-z0-9+/]+=* lego-dns-hook@[a-z0-9._-]+' | head -1)
+[ -n "$PUBKEY" ] || { echo "ERROR: couldn't read $PI pubkey (did scaffold run? Pi reachable?)" >&2; exit 1; }
+if ! sudo -u svc_ansible ssh -i "$ENROLL_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+        -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "radsec-enroll@$CA" "$PUBKEY"; then
+  echo "ERROR: CA registration failed. Is the Tailscale ACL 'tag:ansible -> ${CA}:22' in place?" >&2
+  exit 1
+fi
+
+echo "[3/3] issuing cert + monitoring on $PI..."
+TOKEN_ARG=""
+if [ -f "$ZBX_ENV" ]; then . "$ZBX_ENV"; TOKEN_ARG="-e zabbix_api_token=${ZBX_TOKEN:-}";
+else echo "  (no $ZBX_ENV -> Zabbix alerts skipped; create it with ZBX_TOKEN=<token> to enable)"; fi
+ans "ansible-playbook -i inventory/netbox.yml playbooks/enroll-radsec-pi.yml -l '$PI' -e target='$PI' $TOKEN_ARG"
+
+echo
+echo "Done: $PI has a RadSec cert (auto-renewing) + cert-expiry alerts."
+echo "Upstream flip (optional, per site): set RADSEC_UPSTREAM=true in the Pi .env + render + recreate (needs .13:2083 open)."
