@@ -16,6 +16,9 @@ ans() { sudo -u svc_ansible bash -c "set -a; . /home/svc_ansible/.config/netbox.
 
 echo "[1/3] scaffolding $PI (update.sh self-arms lego)..."
 d2-deploy push "$PI"
+# keep .3's copy of the play in sync with what the Pi just deployed (avoids drift)
+ans "ansible -i inventory/netbox.yml '$PI' -m fetch -a 'src=/opt/d2-edge/ansible/enroll-radsec-pi.yml dest=$A/playbooks/enroll-radsec-pi.yml flat=yes'" >/dev/null 2>&1 \
+  && echo "  (play synced from $PI)" || echo "  (warning: play sync failed; using existing copy)"
 
 echo "[2/3] registering $PI key with the CA..."
 PUBKEY=$(ans "ansible -i inventory/netbox.yml '$PI' -m command -a 'cat /etc/lego/ssh_id.pub' -o 2>/dev/null" \
