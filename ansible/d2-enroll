@@ -37,5 +37,5 @@ else echo "  (no $ZBX_ENV -> Zabbix alerts skipped; create it with ZBX_TOKEN=<to
 ans "ansible-playbook -i inventory/netbox.yml playbooks/enroll-radsec-pi.yml -l '$PI' -e target='$PI' $TOKEN_ARG"
 
 echo
-echo "Done: $PI has a RadSec cert (auto-renewing) + cert-expiry alerts."
-echo "Upstream flip (optional, per site): set RADSEC_UPSTREAM=true in the Pi .env + render + recreate (needs .13:2083 open)."
+echo "Done: $PI is fully RadSec -- cert (auto-renewing) + :2083 listener + Pi->central upstream over RadSec."
+[ -f "$ZBX_ENV" ] || echo "Note: Zabbix cert-expiry alerts skipped (no $ZBX_ENV); add ZBX_TOKEN there + re-run to enable."

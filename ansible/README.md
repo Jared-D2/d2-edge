@@ -20,3 +20,5 @@ The play prints the exact step-1 command (with the pubkey). Renewal afterwards i
 hands-off (the Pi daily `lego-radsec.timer`). To then send the Pi->central auth hop
 over RadSec, open the 3 firewall layers to `.13:2083` and set `RADSEC_UPSTREAM=true`
 in the Pi `.env`.
+
+**Note (2026-06-29):** enrollment now also sets `RADSEC_UPSTREAM=true` + recreates, so the Pi->central upstream goes over RadSec as part of `d2-enroll` (needs `.13:2083` open, which the `tag:edge-pi` ACL + NSG already cover). No separate flip step.
