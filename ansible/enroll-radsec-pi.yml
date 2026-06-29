@@ -33,7 +33,7 @@
     - name: First issuance (idempotent; skips if cert exists; needs the Pi registered)
       ansible.builtin.command: sudo -n /usr/local/sbin/lego-radsec-enroll.sh
       register: enroll
-      changed_when: "'Server responded with a certificate' in (enroll.stdout | default(''))"
+      changed_when: "enroll.rc == 0 and 'nothing to do' not in (enroll.stdout | default(''))"
       failed_when: enroll.rc != 0
 
     - name: Zabbix hostid lookup
