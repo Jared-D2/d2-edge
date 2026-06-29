@@ -4,6 +4,9 @@
 # Idempotent. Runs as root via the svc_ansible sudo grant. Requires the Pi key
 # already registered with acme-hook.
 set -euo pipefail
+if [ ! -f /etc/lego/radsec.env ]; then
+  echo "ERROR: /etc/lego/radsec.env missing -- scaffolding has not run; run update.sh (install-lego-radsec) on this Pi first." >&2; exit 1
+fi
 . /etc/lego/radsec.env                     # CERT_NAME
 EDGE=/opt/d2-edge
 DST="$EDGE/freeradius-proxy/certs"
