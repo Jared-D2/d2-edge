@@ -953,8 +953,16 @@ async def _run_step(step: dict, expected_ssid: str | None) -> dict:
             losses = [r.get("packet_loss_pct", 100.0) for r in (r1, r2)]
             result_summary = {"cloudflare": r1, "google": r2, "loss_pct_min": min(losses)}
             either_passed = bool(r1.get("success") or r2.get("success"))
+            if not either_passed:
+                # Both ICMP probes down: distinguish "internet is down" from
+                # "site firewall blocks outbound ICMP" before failing.
+                tcp = await loop.run_in_executor(None, run_tcp_internet_check)
+                result_summary["tcp_fallback"] = tcp
+                if tcp.get("success"):
+                    result_summary["icmp_blocked"] = True
+                    either_passed = True
             status = "passed" if either_passed else "failed"
-            error = None if either_passed else "both internet targets unreachable"
+            error = None if either_passed else "both internet targets unreachable (icmp+tcp)"
         elif cmd == "http":
             url = args.get("url", "")
             if not url:
@@ -1366,6 +1374,29 @@ def run_ping(target: str, count: int = 10, size: int = 0, df: bool = False, inte
             except Exception:
                 pass
     return result
+
+
+def run_tcp_internet_check(timeout: float = 3.0) -> dict:
+    """TCP-connect probes to well-known anycast endpoints (443/53).
+
+    Fallback for internet_ping at sites whose firewalls block outbound ICMP:
+    both pings fail every cycle while the internet is actually fine
+    (stack-review P1-7, 2026-07-02 — ncm001/wer001 false-incident flood).
+    """
+    probes = {}
+    ok = False
+    for host, port in (("1.1.1.1", 443), ("8.8.8.8", 53)):
+        t0 = time.time()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                probes[f"{host}:{port}"] = {
+                    "success": True,
+                    "connect_ms": round((time.time() - t0) * 1000.0, 1),
+                }
+            ok = True
+        except OSError as e:
+            probes[f"{host}:{port}"] = {"success": False, "error": str(e)[:100]}
+    return {"success": ok, "probes": probes}
 
 
 def run_mtu_test(target: str, max_size: int = 1500) -> dict:
