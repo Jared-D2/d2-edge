@@ -128,6 +128,16 @@ fi
 if [[ -x "$EDGE_DIR/scripts/setup-svc-ansible.sh" ]]; then
     bash "$EDGE_DIR/scripts/setup-svc-ansible.sh"
 fi
+# Wazuh agent: idempotent, FAIL-SOFT install + enrolment of the native Wazuh
+# agent for host security monitoring (package/CVE inventory, FIM, auditd).
+# Gated by DEPLOY_WAZUH in .env (default enabled). Self-arms like the heals
+# above; exits 0 cleanly if already connected or if the manager
+# (10.255.255.28) isn't reachable yet -- the `|| true` is belt-and-suspenders
+# so Wazuh can never abort a fleet deploy. See spec
+# docs/superpowers/specs/2026-07-08-wazuh-agent-pi-fleet-rollout-design.md.
+if [[ -x "$EDGE_DIR/scripts/install-wazuh-agent.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-wazuh-agent.sh" || true
+fi
 # Weekly full-upgrade timer: idempotent install of the systemd timer that
 # runs `apt full-upgrade` (all repos incl third-party Docker/Tailscale)
 # every Saturday 01:00 Australia/Sydney and schedules a 02:00 reboot if one
