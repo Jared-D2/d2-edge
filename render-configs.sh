@@ -57,21 +57,12 @@ echo "[netflow] rendered OK"
 # Build per-subnet client blocks for FreeRADIUS.
 # LOCAL_CLIENT_SUBNET can be a single CIDR ("10.0.0.0/8") OR a list
 # separated by spaces or commas ("10.0.0.0/8 192.168.1.0/24").
-# RADSEC_CLIENT_SECRET: self-heal on first run. Every Pi previously
-# inherited the hardcoded "radsec" literal; auto-generating and
-# persisting into .env avoids forcing a manual fleet-wide edit while
-# still giving each Pi a unique secret (same pattern bootstrap uses
-# for DOCKER_GID). Safe because RadSec is cert-gated and not yet
-# deployed anywhere, so rotating the secret doesn't break any
-# currently-connected client.
-if [[ -z "${RADSEC_CLIENT_SECRET:-}" ]]; then
-    RADSEC_CLIENT_SECRET="$(openssl rand -hex 32)"
-    export RADSEC_CLIENT_SECRET
-    if ! grep -q '^RADSEC_CLIENT_SECRET=' "${EDGE_DIR}/.env"; then
-        echo "RADSEC_CLIENT_SECRET=${RADSEC_CLIENT_SECRET}" >> "${EDGE_DIR}/.env"
-        echo "[render-configs] Generated RADSEC_CLIENT_SECRET and appended to .env"
-    fi
-fi
+# RadSec client secret is the literal "radsec" per RFC 6614 section 2.3 --
+# real TLS clients (AOS-CX radius-server host ... tls) hardcode it and offer
+# no way to configure anything else. Confirmed live 2026-07-15 on NCM-BEL-SW06:
+# a per-Pi random secret drops every packet with "invalid Message-Authenticator".
+# The actual gate for 2083 is TLS itself plus the subnet-scoped client blocks
+# below. (RADSEC_CLIENT_SECRET in existing .env files is vestigial/unused.)
 SUBNETS="${LOCAL_CLIENT_SUBNET//,/ }"
 LOCAL_CLIENTS_UDP_BLOCKS=""
 LOCAL_CLIENTS_RADSEC_BLOCKS=""
@@ -89,7 +80,7 @@ client local-network-${i} {
 client radsec-local-${i} {
     ipaddr = ${subnet}
     proto = tcp
-    secret = ${RADSEC_CLIENT_SECRET}
+    secret = radsec
     require_message_authenticator = yes
     limit {
         max_connections = 16
