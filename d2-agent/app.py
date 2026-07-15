@@ -1801,8 +1801,24 @@ def _resolve_and_check(host: str) -> tuple[bool, list]:
     return False, ips
 
 
-def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) -> dict:
-    """HTTP/HTTPS response time test using curl timing metrics."""
+def run_http_test(url: str, follow_redirects: bool = False, timeout: int = 15,
+                  retries: int = 2, retry_delay: float = 1.0) -> dict:
+    """HTTP/HTTPS response time test using curl timing metrics.
+
+    follow_redirects defaults to False so availability probes score the
+    *intended* endpoint's own response: e.g. https://login.microsoftonline.com
+    answers 302 (redirect to www.office.com) and that 302 means M365 auth is up.
+    Following the redirect made a transient blip on the redirect *target*
+    (office.com) read as "M365 down" (false positive, 2026-07-14). Callers that
+    need the full redirect chain (diagnostic http step, on-demand http_test)
+    pass follow_redirects=True explicitly.
+
+    On a transport failure (curl non-zero exit: connect refused/reset/timeout)
+    the probe retries up to `retries` times, waiting `retry_delay`s between
+    attempts, before recording success=0 -- so a sub-second network hiccup does
+    not open an incident. HTTP error codes (4xx/5xx) return ok=True and are NOT
+    retried; they already count as a reachable endpoint (success = http_code > 0).
+    """
     # Pre-flight: if the host is in thread-spawn exhaustion, both
     # _resolve_and_check (Python getaddrinfo) and curl-internal getaddrinfo
     # will fail in different ways. Raise SpawnFailureError up front so the
@@ -1851,7 +1867,16 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
     if follow_redirects and not _looks_like_ip_literal(host):
         cmd.append("-L")
     cmd.append(url)
-    ok, raw = run_cmd(cmd, timeout=timeout + 5)
+    # Retry transport failures (curl non-zero exit) a few times before recording
+    # a failed sample, so a transient connect blip does not open an incident.
+    # run_cmd raises SpawnFailureError on thread starvation -- that propagates
+    # (no retry), matching prior behaviour. HTTP error codes give ok=True.
+    attempts = max(1, retries + 1)
+    for _attempt in range(attempts):
+        ok, raw = run_cmd(cmd, timeout=timeout + 5)
+        if ok or _attempt == attempts - 1:
+            break
+        time.sleep(retry_delay)
     result = {"url": url, "success": ok, "timestamp": time.time()}
     if ok:
         parsed = {}
