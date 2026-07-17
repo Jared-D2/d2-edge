@@ -37,6 +37,7 @@
       failed_when: enroll.rc != 0
 
     - name: Zabbix hostid lookup
+      delegate_to: localhost
       ansible.builtin.uri:
         url: "{{ zabbix_api_url }}"
         method: POST
@@ -47,6 +48,7 @@
       register: zbx_host
       when: zabbix_api_token is defined
     - name: Zabbix trapper item (ignore if exists)
+      delegate_to: localhost
       ansible.builtin.uri:
         url: "{{ zabbix_api_url }}"
         method: POST
@@ -61,6 +63,7 @@
       failed_when: false
       when: zabbix_api_token is defined and zbx_host.json.result | length > 0
     - name: Zabbix triggers warn<=10>5 + high<=5 (ignore if exist)
+      delegate_to: localhost
       ansible.builtin.uri:
         url: "{{ zabbix_api_url }}"
         method: POST
