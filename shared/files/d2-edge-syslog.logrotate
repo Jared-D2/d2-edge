@@ -1,0 +1,25 @@
+# Runaway-size guard for the syslog-proxy local log copy.
+#
+# NOTE ON THE GLOB: syslog-ng writes to
+#   /opt/d2-edge/syslog-proxy/logs/${YEAR}/${MONTH}/${DAY}/messages.log
+# — four path components under logs/, not three. The previous inline config
+# in bootstrap.sh globbed logs/*/*/*.log, which matches only files sitting
+# directly in a MONTH directory. No such file is ever created, so logrotate
+# silently matched nothing on every Pi from bootstrap onward. Hence the
+# unbounded growth this file (plus the cleanup cron) exists to stop.
+#
+# Day-granular rotation is already provided by the dated directory tree, so
+# this config is deliberately NOT the retention mechanism — /etc/cron.d/
+# syslog-proxy-cleanup owns deletion. What this adds is a cap on a single
+# runaway day (maxsize) so one chatty device cannot fill the card before the
+# nightly purge gets a chance to run.
+/opt/d2-edge/syslog-proxy/logs/*/*/*/messages.log {
+    daily
+    maxsize 500M
+    rotate 2
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

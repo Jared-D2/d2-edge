@@ -138,6 +138,16 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-wazuh-agent.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-wazuh-agent.sh" || true
 fi
+# syslog-proxy local-log retention: installs the logrotate config + nightly
+# purge cron for /opt/d2-edge/syslog-proxy/logs. Needed as a heal (not just
+# in bootstrap) because every Pi built before 2026-07-20 has been growing
+# that tree unbounded at ~1.3 GB/day -- bootstrap's inline logrotate config
+# globbed one path component short of where syslog-ng writes, so it silently
+# matched nothing. Reports the backlog it will purge; never deletes during a
+# routine update (see --purge-now in the script).
+if [[ -x "$EDGE_DIR/scripts/install-syslog-retention.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-syslog-retention.sh" || true
+fi
 # Weekly full-upgrade timer: idempotent install of the systemd timer that
 # runs `apt full-upgrade` (all repos incl third-party Docker/Tailscale)
 # every Saturday 01:00 Australia/Sydney and schedules a 02:00 reboot if one

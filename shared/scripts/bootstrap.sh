@@ -229,22 +229,13 @@ if [[ -x "${EDGE_DIR}/scripts/setup-oxidized-proxy-user.sh" ]]; then
 fi
 
 
-# ─── Log rotation ─────────────────────────────────────────────────────────
-cat > /etc/logrotate.d/d2-edge-syslog << 'LOGROTATE'
-/opt/d2-edge/syslog-proxy/logs/*/*/*.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 0640 root root
-    sharedscripts
-    postrotate
-        docker kill --signal="SIGHUP" syslog-proxy 2>/dev/null || true
-    endscript
-}
-LOGROTATE
+# ─── Log rotation + local-log retention ───────────────────────────────────
+# Installed from shared/files via a shared script so update.sh can heal both
+# files on Pis already in the field (see the [3/6] host-heal block there).
+# The inline heredoc this replaced globbed logs/*/*/*.log — one path
+# component short of where syslog-ng actually writes — so it matched nothing
+# and never rotated anything.
+bash "${EDGE_DIR}/scripts/install-syslog-retention.sh"
 
 # ─── Create required directories ──────────────────────────────────────────
 mkdir -p "${EDGE_DIR}"/{syslog-proxy/{config,logs,state},zabbix-proxy/{config,data,logs},freeradius-proxy/config/{templates,rendered},auvik/{config,etc,logs},d2-agent,shared/scripts}
