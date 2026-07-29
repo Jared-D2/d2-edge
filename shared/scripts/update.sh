@@ -192,11 +192,55 @@ echo "[4/6] Re-rendering configs..."
 bash "$EDGE_DIR/render-configs.sh"
 echo "  OK"
 
+# --- Which services does this Pi run? -------------------------------------
+# The per-service DEPLOY_* keys in .env drive `profiles:` in
+# docker-compose.yml. Compose AUTO-ENABLES a service's profile whenever that
+# service is named on the command line, so the old unconditional
+# `up -d --force-recreate <all eight>` below silently resurrected every
+# disabled container on each update — the toggles only ever worked on a bare
+# `up`. Partition the set here instead: recreate what is enabled, stop and
+# remove what is not, so the .env flags are self-enforcing.
+#
+# Value semantics match docker-compose.yml's ${VAR:-enabled}: a missing key
+# counts as enabled; anything other than the literal 'enabled'
+# (conventionally 'disabled') counts as off.
+deploy_flag() {
+    local val
+    val=$(grep -E "^${1}=" "$EDGE_DIR/.env" 2>/dev/null | tail -1 \
+          | cut -d= -f2- | tr -d '[:space:]')
+    echo "${val:-enabled}"
+}
+# cert-server carries no `profiles:` key — unconditional, like tailscale.
+RECREATE=(cert-server)
+DISABLED=()
+for entry in auvik:DEPLOY_AUVIK d2-agent:DEPLOY_D2_AGENT \
+             freeradius-proxy:DEPLOY_FREERADIUS_PROXY \
+             netflow-proxy:DEPLOY_NETFLOW_PROXY \
+             syslog-proxy:DEPLOY_SYSLOG_PROXY \
+             zabbix-agent2:DEPLOY_ZABBIX_AGENT2 \
+             zabbix-proxy:DEPLOY_ZABBIX_PROXY; do
+    if [[ "$(deploy_flag "${entry##*:}")" == "enabled" ]]; then
+        RECREATE+=("${entry%%:*}")
+    else
+        DISABLED+=("${entry%%:*}")
+    fi
+done
+echo
+echo "Services enabled:  ${RECREATE[*]}"
+if (( ${#DISABLED[@]} )); then
+    echo "Services disabled: ${DISABLED[*]}"
+fi
+
 echo
 echo "[5/6] Building d2-agent image..."
 cd "$EDGE_DIR"
-docker compose build d2-agent --pull
-echo "  OK"
+# Skip the multi-minute ARM build on Pis that do not run the agent.
+if [[ " ${RECREATE[*]} " == *" d2-agent "* ]]; then
+    docker compose build d2-agent --pull
+    echo "  OK"
+else
+    echo "  skipped (DEPLOY_D2_AGENT is not 'enabled')"
+fi
 
 echo
 echo "[6/6] Recreating containers..."
@@ -227,9 +271,14 @@ export COMPOSE_PROFILES=enabled
 if [[ -x "$EDGE_DIR/scripts/auvik-ensure-tenant.sh" ]]; then
     bash "$EDGE_DIR/scripts/auvik-ensure-tenant.sh" || true
 fi
-docker compose up -d --force-recreate \
-    auvik cert-server d2-agent freeradius-proxy netflow-proxy \
-    syslog-proxy zabbix-agent2 zabbix-proxy
+docker compose up -d --force-recreate "${RECREATE[@]}"
+# Take down anything the operator switched off in .env. A bare `up` never
+# touches an already-running container that a profile now excludes, so
+# without this the service keeps running on stale config indefinitely.
+if (( ${#DISABLED[@]} )); then
+    docker compose stop "${DISABLED[@]}"
+    docker compose rm -f "${DISABLED[@]}"
+fi
 docker compose up -d tailscale
 echo "  OK"
 
