@@ -5,9 +5,20 @@ Usage: render-ser2net.py <ports.yaml> <ser2net.yaml out> <slots.rules out>
 Exits non-zero on duplicate slots, bad slot range, or missing fields.
 Requires python3-yaml (installed by setup-oob.sh).
 """
+import re
 import sys
 import yaml
 
+# device/platform are interpolated into YAML quoted scalars AND a
+# filesystem path — restrict to a safe charset so a quote can't break the
+# whole config (all slots down) and a '/' can't write transcripts outside
+# the audited /var/log/oob-console directory (review finding #10).
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+
+# kickolduser: a stale/dead TCP session must not lock the slot until a
+# container restart (pilot lockout); the newest connection wins.
+# timeout: drop idle sessions after 30 min — an abandoned console may be
+# logged into a device.
 CONN_TMPL = """\
 connection: &slot{slot:02d}
   accepter: telnet(rfc2217),tcp,{port}
@@ -17,6 +28,8 @@ connection: &slot{slot:02d}
     trace-both: '/var/log/oob-console/{device}-\\p-\\Y\\M\\D.log'
     trace-timestamp: true
     max-connections: 1
+    kickolduser: true
+    timeout: 1800
 """
 
 RULE_TMPL = ('SUBSYSTEM=="tty", ENV{{ID_PATH}}=="{usb_path}", '
@@ -43,6 +56,10 @@ def main():
             sys.exit("render-ser2net: slot %d out of range 1-16" % n)
         if n in seen:
             sys.exit("render-ser2net: duplicate slot %d" % n)
+        for label, val in (("device", dev), ("platform", platform)):
+            if not NAME_RE.match(val):
+                sys.exit("render-ser2net: slot %d %s %r invalid — use letters/"
+                         "digits/dot/dash/underscore, max 32 chars" % (n, label, val))
         seen.add(n)
         conns.append(CONN_TMPL.format(slot=n, port=3000 + n, baud=baud,
                                       device=dev, platform=platform))
