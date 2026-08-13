@@ -14,3 +14,12 @@ IPv6AcceptRA=no
 [DHCPv4]
 RouteTable=200
 UseDNS=no
+
+# Egress cap: nothing on the OOB path may run away with the metered SIM.
+# networkd re-applies this every time it configures wwan0, so it survives
+# the modem's frequent re-enumerations (a bare `tc` command would not).
+[TokenBucketFilter]
+Parent=root
+Rate=2M
+Burst=32K
+LatencySec=0.4
