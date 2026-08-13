@@ -281,3 +281,82 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # ─── OOB console (4G HAT) ─────────────────────────────────────────────────
+  # Opt-in per Pi: profiles default DISABLED (unlike every other service).
+  # oob-tailscale owns an ISOLATED netns on the br-oob bridge — deliberately
+  # NOT network_mode:host. The host ip rule steers 172.31.250.0/29 into
+  # table 200 (wwan0-or-blackhole), so this pair can only ever egress via
+  # 4G, and nothing else on the Pi can. Own node identity <hostname>-oob,
+  # tag:oob, minted by the DEDICATED oob OAuth client (TS_OOB_AUTHKEY).
+  oob-tailscale:
+    image: tailscale/tailscale:v1.96.5@sha256:dbeff02d2337344b351afac203427218c4d0a06c43fc10a865184063498472a6
+    container_name: oob-tailscale
+    profiles: ["${DEPLOY_OOB_CONSOLE:-disabled}"]
+    hostname: ${EDGE_HOSTNAME}-oob
+    restart: unless-stopped
+    networks:
+      - oob
+    dns:
+      - 1.1.1.1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./oob-console/ts-state:/var/lib/tailscale
+    environment:
+      - TS_AUTHKEY=${TS_OOB_AUTHKEY:-}
+      - TS_HOSTNAME=${EDGE_HOSTNAME}-oob
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+    # In-band fallback: consoles reachable from the Pi itself via
+    # `telnet localhost 300N` (SSH in normally) — loopback-only publish,
+    # does not weaken the 4G-only rule for remote access.
+    ports:
+      - "127.0.0.1:3001-3016:3001-3016"
+    command: >
+      sh -c "tailscaled &
+      until tailscale status --json >/dev/null 2>&1; do sleep 2; done;
+      tailscale up
+      --authkey=$$TS_AUTHKEY
+      --hostname=$$TS_HOSTNAME
+      --advertise-tags=tag:oob && wait"
+    healthcheck:
+      test: ["CMD", "tailscale", "status", "--json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ser2net console server sharing oob-tailscale's netns. /dev is a ro
+  # bind (device I/O still works; ro only blocks fs writes) because the
+  # /dev/d2-console/* symlinks are relative and need their /dev/ttyUSB*
+  # targets visible. cgroup rules grant char majors 188 (ttyUSB) and
+  # 166 (ttyACM); hotplugged adapters appear without a recreate.
+  oob-console:
+    build: ./oob-console
+    image: d2-edge-oob-console
+    container_name: oob-console
+    profiles: ["${DEPLOY_OOB_CONSOLE:-disabled}"]
+    restart: unless-stopped
+    network_mode: "service:oob-tailscale"
+    depends_on:
+      oob-tailscale:
+        condition: service_healthy
+    device_cgroup_rules:
+      - "c 188:* rwm"
+      - "c 166:* rwm"
+    volumes:
+      - /dev:/dev:ro
+      - ./oob-console/ser2net.yaml:/etc/ser2net/ser2net.yaml:ro
+      - ./oob-console/logs:/var/log/oob-console
+
+networks:
+  oob:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-oob
+    ipam:
+      config:
+        - subnet: 172.31.250.0/29
