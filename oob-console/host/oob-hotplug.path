@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch /dev/d2-console for console adapter hotplug
+
+[Path]
+PathModified=/dev/d2-console
+Unit=oob-hotplug.service
+
+[Install]
+WantedBy=multi-user.target

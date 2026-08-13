@@ -86,16 +86,18 @@ else
     networkctl reload 2>/dev/null || true
 fi
 
-# 5. Routing + power + watchdog units.
+# 5. Routing + power + watchdog + hotplug units.
 install -m 0755 "$HOSTD/oob-watchdog.sh" /usr/local/sbin/oob-watchdog.sh
-for u in oob-routing.service sim7600-power.service oob-watchdog.service oob-watchdog.timer; do
+install -m 0755 "$HOSTD/oob-hotplug.sh"  /usr/local/sbin/oob-hotplug.sh
+for u in oob-routing.service sim7600-power.service oob-watchdog.service \
+         oob-watchdog.timer oob-hotplug.service oob-hotplug.path; do
     install -m 0644 "$HOSTD/$u" "/etc/systemd/system/$u"
 done
 systemctl daemon-reload
-systemctl enable oob-routing.service oob-watchdog.timer sim7600-power.service
+systemctl enable oob-routing.service oob-watchdog.timer sim7600-power.service oob-hotplug.path
 # restart (not enable --now): re-asserts the rule + blackhole on every run.
 systemctl restart oob-routing.service
-systemctl start oob-watchdog.timer 2>/dev/null || true
+systemctl start oob-watchdog.timer oob-hotplug.path 2>/dev/null || true
 
 # Helper: wait for a condition with a cap instead of a fixed worst-case sleep.
 wait_for() {  # wait_for <seconds> <cmd...>

@@ -11,7 +11,7 @@ slots:
     device: ncm-fgt01
     baud: 9600
     platform: fortigate
-    usb_path: platform-fd500000.usb-usb-0:1.1:1.0
+    usb_serial: A50285BI
   - slot: 2
     device: ncm-cx01
     baud: 115200
@@ -36,9 +36,16 @@ assert "3001" in ser2net and "3002" in ser2net
 assert "/dev/d2-console/slot01" in ser2net and "/dev/d2-console/slot02" in ser2net
 assert "9600n81" in ser2net and "115200n81" in ser2net
 assert "ncm-fgt01" in ser2net  # trace log path carries device name
-# udev fragment: ID_PATH-keyed symlink per slot
-assert 'ENV{ID_PATH}=="platform-fd500000.usb-usb-0:1.1:1.0"' in rules
+
+# udev fragment: serial-keyed rule for slot 1, path-keyed for slot 2
+assert 'ENV{ID_SERIAL_SHORT}=="A50285BI"' in rules
 assert 'SYMLINK+="d2-console/slot01"' in rules
+assert 'ENV{ID_PATH}=="platform-fd500000.usb-usb-0:1.2:1.0"' in rules
+
+# directory connection on :3000 listing both slots
+assert "tcp,3000" in ser2net and "connector: echo" in ser2net
+assert "console directory" in ser2net
+assert ":3001" in ser2net and ":3002" in ser2net
 
 # duplicate slot numbers must fail loud
 r2, _, _ = render(SAMPLE.replace("slot: 2", "slot: 1"))
@@ -54,8 +61,20 @@ assert r4.returncode != 0 and "invalid" in r4.stderr.lower()
 r5, _, _ = render(SAMPLE.replace("ncm-cx01", "audit/../fgt01"))
 assert r5.returncode != 0 and "invalid" in r5.stderr.lower()
 
-# stale-session and idle-session protections must be present on every slot
+# both identity keys on one slot must fail; neither must fail
+r6, _, _ = render(SAMPLE.replace("usb_serial: A50285BI",
+                                 "usb_serial: A50285BI\n    usb_path: x-y-z-1"))
+assert r6.returncode != 0 and "exactly one" in r6.stderr.lower()
+r7, _, _ = render(SAMPLE.replace("    usb_serial: A50285BI\n", ""))
+assert r7.returncode != 0 and "exactly one" in r7.stderr.lower()
+
+# same identity on two slots must fail
+r8, _, _ = render(SAMPLE.replace("usb_path: platform-fd500000.usb-usb-0:1.2:1.0",
+                                 "usb_serial: A50285BI"))
+assert r8.returncode != 0 and "two slots" in r8.stderr.lower()
+
+# stale-session protections present on every slot (not the directory)
 assert ser2net.count("kickolduser: true") == 2
-assert ser2net.count("mdns: false") == 2
+assert ser2net.count("mdns: false") == 3
 
 print("OK")
