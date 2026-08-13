@@ -95,7 +95,10 @@ fi
 #      profile = no IPv4 session; Telstra-wholesale SIMs need it explicit).
 #      Type "IP" not IPV4V6 — v6-primary grants no v4 on these SIMs.
 install -m 0755 "$HOSTD/oob-at.py" /usr/local/sbin/oob-at.py
-OOB_APN=$(grep -E '^OOB_APN=' "$EDGE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]')
+# Shared parser: an operator-quoted OOB_APN="telstra.internet" must yield
+# the bare APN, not literal quotes baked into the AT+CGDCONT command.
+. "$EDGE_DIR/shared/scripts/lib/envfile.sh"
+OOB_APN=$(env_get OOB_APN "$EDGE_DIR/.env")
 if [[ -n "$OOB_APN" && -e /dev/d2-modem ]]; then
     if ! /usr/local/sbin/oob-at.py 'AT+CGDCONT?' 2>/dev/null | grep -q "\"$OOB_APN\""; then
         echo "[oob] setting APN on PDP profile 1: $OOB_APN (modem will reset)"
