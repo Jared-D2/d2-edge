@@ -56,6 +56,6 @@ assert r5.returncode != 0 and "invalid" in r5.stderr.lower()
 
 # stale-session and idle-session protections must be present on every slot
 assert ser2net.count("kickolduser: true") == 2
-assert ser2net.count("timeout: 1800") == 2
+assert ser2net.count("mdns: false") == 2
 
 print("OK")

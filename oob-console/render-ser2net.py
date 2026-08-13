@@ -17,8 +17,10 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 
 # kickolduser: a stale/dead TCP session must not lock the slot until a
 # container restart (pilot lockout); the newest connection wins.
-# timeout: drop idle sessions after 30 min — an abandoned console may be
-# logged into a device.
+# NOTE: ser2net 4.x has no per-connection idle-timeout option ('timeout:'
+# is rejected as unknown and KILLS the connection definition — verified on
+# the pilot); abandoned-session hygiene relies on kickolduser + device-side
+# exec-timeout. mdns off: no resolver in the isolated netns.
 CONN_TMPL = """\
 connection: &slot{slot:02d}
   accepter: telnet(rfc2217),tcp,{port}
@@ -29,7 +31,7 @@ connection: &slot{slot:02d}
     trace-timestamp: true
     max-connections: 1
     kickolduser: true
-    timeout: 1800
+    mdns: false
 """
 
 RULE_TMPL = ('SUBSYSTEM=="tty", ENV{{ID_PATH}}=="{usb_path}", '
