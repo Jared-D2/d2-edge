@@ -1,0 +1,8 @@
+[Unit]
+Description=Tailscale wedge watchdog (restart container when wedged with WAN up)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/d2-edge/scripts/tailscale-watchdog.sh
