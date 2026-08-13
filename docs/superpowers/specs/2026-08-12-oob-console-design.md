@@ -311,3 +311,54 @@ the HAT revision, confirm RNDIS mode pin, burn down modem quirks into
 | Tailnet (manual, one-time) | OAuth client for `tag:oob`, tagOwners, ACL rule |
 | Graylog (manual, one-time) | Restricted stream/role for console transcripts |
 | Zabbix (one-time) | wwan0 items + no-carrier trigger |
+
+---
+
+## 14. Pilot findings addendum (2026-08-13, d2-lab-pi01)
+
+Full E2E proven: workstation → tailnet → 4G (ALDI/Telstra wholesale, APN
+mdata.net.au) → ser2net → FortiGate (JC-FG61E) console; SIM-in cold boot
+self-assembles unattended. Six defects found and fixed during the pilot —
+all now on this branch:
+
+1. **Blackhole metric** must be WORSE than networkd's DHCP default (1024).
+   Originally 1000 → all OOB egress blackholed even with live carrier.
+   Now 2000.
+2. **`throw 172.31.250.0/29` required in table 200** — the from-subnet ip
+   rule otherwise captures kernel reverse-path validation for the bridge,
+   silently breaking gateway ARP (zero container egress).
+3. **networkd deletes "foreign" RPDB rules/routes on reconfigure**
+   (fail-open). `ManageForeignRoutingPolicyRules=no` +
+   `ManageForeignRoutes=no` conf.d drop-in; oob-routing re-asserts every
+   setup run.
+4. **NetworkManager activates unpinned wired profiles on wwan0** (RNDIS =
+   ethernet class) — took eth0 down on the pilot. NM unmanaged-devices
+   drop-in (wwan0/br-oob/veth*/docker0); also pin the wired profile's
+   interface-name.
+5. **Alpine ser2net is 3.5.1** (line-based config, cannot parse YAML,
+   binds nothing, logs nothing). Image now debian:trixie-slim (ser2net 4.x).
+6. **Modem AT port is USB interface 04 in RNDIS mode** (02 = diag).
+   udev symlink rules are PID-conditional (9001→02, 9011→04).
+
+Operational facts (fleet-relevant):
+
+- PDP type must be `"IP"` — `IPV4V6` yields a v6-only session on
+  Telstra-wholesale SIMs (no IPv4). setup-oob enforces OOB_APN on PDP
+  profile 1 via `oob-at.py` and resets the modem when changing it.
+- The classic "SIM7600X 4G HAT" auto-powers at boot; PWRKEY pulse was
+  never needed on the pilot. Its "USB TO UART" micro-USB socket hosts an
+  onboard CP2102 that masquerades as a console adapter — the data cable
+  belongs in the socket marked "USB". Antenna pigtail → MAIN.
+- The RNDIS modem-link IP (192.168.225.x) appears even with no SIM — it
+  proves the USB data path, not cellular registration.
+- ser2net silently skips binding a slot whose serial device is absent at
+  startup: after plugging an adapter, restart oob-console. compose now
+  carries `depends_on: restart: true` so oob-console follows
+  oob-tailscale netns recreation automatically.
+- docker-proxy accepts loopback connections even when the backend is
+  dead — a bare TCP connect on 127.0.0.1:300N is NOT proof ser2net is up;
+  expect the banner.
+- Convention: keep the modem's spare AT port as a synthetic self-test
+  slot (connect → `AT` → `OK`) on every OOB Pi.
+- USB 3.0 ports are fine for console adapters; the "USB 2.0 for the
+  modem" guidance is about the modem itself.
