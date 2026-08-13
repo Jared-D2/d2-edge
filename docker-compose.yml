@@ -204,7 +204,7 @@ services:
     # Pinned by digest (multi-arch manifest list, incl. arm64). To re-pin when
     # bumping the tag: docker manifest inspect zabbix/zabbix-agent2:<new-tag>
     # and update the digest below to the top-level manifest-list digest.
-    image: zabbix/zabbix-agent2:ubuntu-7.4-latest@sha256:94ca3bb304ca4d253f344ee8077bcef2be1c8a3942e17d29a8363e842044e8b5
+    image: zabbix/zabbix-agent2:ubuntu-7.4-latest@sha256:47519349da4e2adf0a9f4a10bd57f6d74327dcd7d126d9e1d6693d5c4389161e
     container_name: zabbix-agent2
     profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped
