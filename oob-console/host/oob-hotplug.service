@@ -1,0 +1,10 @@
+[Unit]
+Description=Restart oob-console after console slot hotplug
+After=docker.service
+
+[Service]
+Type=oneshot
+# debounce: the burst of udev events from one physical plug collapses
+# into a single restart decision
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/sbin/oob-hotplug.sh

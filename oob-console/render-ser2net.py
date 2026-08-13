@@ -4,6 +4,14 @@
 Usage: render-ser2net.py <ports.yaml> <ser2net.yaml out> <slots.rules out>
 Exits non-zero on duplicate slots, bad slot range, or missing fields.
 Requires python3-yaml (installed by setup-oob.sh).
+
+Slot identity — each slot gives exactly ONE of:
+  usb_serial: adapter's unique serial (udevadm ... | grep ID_SERIAL_SHORT).
+              The slot follows the adapter to ANY port or hub position.
+              Fleet standard: FTDI-based adapters (unique serials). CP2102s
+              commonly share the non-unique "0001"; CH340s have none.
+  usb_path:   physical USB port (ID_PATH). For serial-less adapters; slot
+              identity = the labelled port, moving the cable needs an edit.
 """
 import re
 import sys
@@ -14,6 +22,8 @@ import yaml
 # whole config (all slots down) and a '/' can't write transcripts outside
 # the audited /var/log/oob-console directory (review finding #10).
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+SERIAL_RE = re.compile(r"^[A-Za-z0-9]{4,32}$")
+PATH_RE = re.compile(r"^[A-Za-z0-9:._-]{4,128}$")
 
 # kickolduser: a stale/dead TCP session must not lock the slot until a
 # container restart (pilot lockout); the newest connection wins.
@@ -34,8 +44,23 @@ connection: &slot{slot:02d}
     mdns: false
 """
 
-RULE_TMPL = ('SUBSYSTEM=="tty", ENV{{ID_PATH}}=="{usb_path}", '
-             'SYMLINK+="d2-console/slot{slot:02d}", ENV{{ID_MM_DEVICE_IGNORE}}="1"\n')
+# Slot directory on :3000 — an engineer who remembers only the hostname
+# telnets here and sees what lives on which port. echo connector: prints
+# the banner, echoes input, holds no serial device.
+DIR_TMPL = """\
+connection: &directory
+  accepter: telnet,tcp,3000
+  connector: echo
+  options:
+    banner: "{banner}"
+    max-connections: 4
+    mdns: false
+"""
+
+RULE_PATH_TMPL = ('SUBSYSTEM=="tty", ENV{{ID_PATH}}=="{ident}", '
+                  'SYMLINK+="d2-console/slot{slot:02d}", ENV{{ID_MM_DEVICE_IGNORE}}="1"\n')
+RULE_SERIAL_TMPL = ('SUBSYSTEM=="tty", ENV{{ID_SERIAL_SHORT}}=="{ident}", '
+                    'SYMLINK+="d2-console/slot{slot:02d}", ENV{{ID_MM_DEVICE_IGNORE}}="1"\n')
 
 
 def main():
@@ -45,12 +70,12 @@ def main():
     slots = (data or {}).get("slots") or []
     if not slots:
         sys.exit("render-ser2net: no slots defined in %s" % ports_f)
-    seen = set()
-    conns, rules = [], []
+    seen, seen_ident = set(), set()
+    conns, rules, dir_lines = [], [], []
     for s in slots:
         try:
             n = int(s["slot"]); dev = str(s["device"])
-            baud = int(s["baud"]); path = str(s["usb_path"])
+            baud = int(s["baud"])
             platform = str(s.get("platform", "unknown"))
         except (KeyError, TypeError, ValueError) as e:
             sys.exit("render-ser2net: bad slot entry %r (%s)" % (s, e))
@@ -62,12 +87,34 @@ def main():
             if not NAME_RE.match(val):
                 sys.exit("render-ser2net: slot %d %s %r invalid — use letters/"
                          "digits/dot/dash/underscore, max 32 chars" % (n, label, val))
-        seen.add(n)
+        serial = s.get("usb_serial")
+        path = s.get("usb_path")
+        if bool(serial) == bool(path):
+            sys.exit("render-ser2net: slot %d needs exactly one of usb_serial / usb_path" % n)
+        if serial is not None:
+            serial = str(serial)
+            if not SERIAL_RE.match(serial):
+                sys.exit("render-ser2net: slot %d usb_serial %r invalid" % (n, serial))
+            ident, tmpl, how = serial, RULE_SERIAL_TMPL, "serial " + serial
+        else:
+            path = str(path)
+            if not PATH_RE.match(path):
+                sys.exit("render-ser2net: slot %d usb_path %r invalid" % (n, path))
+            ident, tmpl, how = path, RULE_PATH_TMPL, "port-bound"
+        if ident in seen_ident:
+            sys.exit("render-ser2net: identity %r used by two slots" % ident)
+        seen.add(n); seen_ident.add(ident)
         conns.append(CONN_TMPL.format(slot=n, port=3000 + n, baud=baud,
                                       device=dev, platform=platform))
-        rules.append(RULE_TMPL.format(usb_path=path, slot=n))
+        rules.append(tmpl.format(ident=ident, slot=n))
+        dir_lines.append(" :%d  slot %-2d  %-32s %-16s %6d baud  [%s]"
+                         % (3000 + n, n, dev, platform, baud, how))
+    banner = ("\\r\\nD2 OOB console directory\\r\\n"
+              + "\\r\\n".join(dir_lines)
+              + "\\r\\n(telnet <this-host> <port>; newest connection wins a busy slot)\\r\\n")
     with open(ser2net_f, "w") as f:
-        f.write("%YAML 1.1\n---\n" + "\n".join(conns))
+        f.write("%YAML 1.1\n---\n" + DIR_TMPL.format(banner=banner)
+                + "\n" + "\n".join(conns))
     with open(rules_f, "w") as f:
         f.write("# Rendered by render-ser2net.py from ports.yaml — do not edit\n"
                 + "".join(rules))

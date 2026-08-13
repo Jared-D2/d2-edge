@@ -316,7 +316,7 @@ services:
     # `telnet localhost 300N` (SSH in normally) — loopback-only publish,
     # does not weaken the 4G-only rule for remote access.
     ports:
-      - "127.0.0.1:3001-3016:3001-3016"
+      - "127.0.0.1:3000-3016:3000-3016"   # :3000 = slot directory banner
     command: >
       sh -c "tailscaled &
       until tailscale status --json >/dev/null 2>&1; do sleep 2; done;

@@ -1,15 +1,24 @@
 # Per-site console map. Copy to ports.yaml (gitignored) and edit.
-# slot N ↔ /dev/d2-console/slotNN ↔ TCP 300N ↔ the hub port labelled N.
-# usb_path: from `udevadm info -q property /dev/ttyUSBx | grep ID_PATH=`
-#           after plugging the adapter into its labelled hub port.
-# Shaped to mirror NetBox ConsoleServerPort→ConsolePort so a phase-2
-# generator can emit this file from NetBox.
+# slot N ↔ /dev/d2-console/slotNN ↔ TCP 300N. Port :3000 lists all slots.
+#
+# Each slot needs exactly ONE of:
+#   usb_serial: the adapter's unique serial — the slot then follows the
+#               adapter to ANY USB port or hub position (preferred).
+#               FLEET STANDARD: buy FTDI-based adapters (unique serials).
+#               Find it:  udevadm info -q property /dev/ttyUSBx | grep ID_SERIAL_SHORT
+#   usb_path:   the physical USB port (for serial-less CH340s / non-unique
+#               CP2102s) — slot identity = the labelled port; moving the
+#               cable requires editing this file.
+#               Find it:  udevadm info -q property /dev/ttyUSBx | grep ID_PATH=
+#
+# After editing: sudo bash /opt/d2-edge/shared/scripts/update.sh
+# (hotplugging an adapter later is picked up automatically)
 slots:
   - slot: 1
-    device: ncm-fgt01        # log filename + Graylog field, free text
+    device: ncm-fgt01        # log filename + Graylog field, [A-Za-z0-9._-]
     baud: 9600
     platform: fortigate
-    usb_path: platform-fd500000.usb-usb-0:1.1:1.0
+    usb_serial: A50285BI
   - slot: 2
     device: ncm-cx01
     baud: 115200
