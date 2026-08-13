@@ -1,0 +1,9 @@
+[Unit]
+Description=Run D2 OOB 4G link watchdog every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

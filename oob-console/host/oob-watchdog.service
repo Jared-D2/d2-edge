@@ -1,0 +1,7 @@
+[Unit]
+Description=D2 OOB 4G link watchdog
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/d2-oob
+ExecStart=/usr/local/sbin/oob-watchdog.sh

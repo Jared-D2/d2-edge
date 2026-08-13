@@ -1,0 +1,14 @@
+[Unit]
+Description=D2 OOB policy routing (table 200 rule + fail-closed blackhole)
+After=network-pre.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Idempotent: replace semantics via del-then-add.
+ExecStart=/bin/sh -c 'ip rule del from 172.31.250.0/29 lookup 200 2>/dev/null; ip rule add from 172.31.250.0/29 lookup 200 priority 200'
+ExecStart=/bin/sh -c 'ip route replace blackhole default metric 1000 table 200'
+
+[Install]
+WantedBy=multi-user.target

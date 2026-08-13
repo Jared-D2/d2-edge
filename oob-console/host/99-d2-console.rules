@@ -1,0 +1,22 @@
+# oob-console/host/99-d2-console.rules
+# Installed to /etc/udev/rules.d/ by setup-oob.sh. Three jobs:
+#
+# 1. SIM7600 modem (vendor 1e0e): tag every tty it exposes so
+#    ModemManager never probes it destructively, and symlink the AT
+#    command port (interface 02 on SIM7600) to /dev/d2-modem. The
+#    presence of /dev/d2-modem is the "HAT is fitted" signal used by
+#    the oob-console entrypoint guard and the watchdog.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1e0e", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1e0e", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="d2-modem"
+#
+# 2. Console slots: stable /dev/d2-console/slotNN symlinks keyed on the
+#    PHYSICAL USB port (ID_PATH), not adapter serial — CH340s have no
+#    unique serial. Slot identity = labelled hub port, by design. The
+#    per-Pi ID_PATH rules are rendered from ports.yaml into slots.rules
+#    and installed by setup-oob.sh as 98-d2-console-slots.rules; this
+#    shipped file carries only the modem + catch-all MM guard.
+#
+# 3. Any USB-serial adapter that is NOT the modem: still guard against
+#    ModemManager AT probing (it would type garbage into a live device
+#    console). brltty is removed by setup-oob.sh for the same reason.
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", DRIVERS=="ch341-uart|cp210x|ftdi_sio|pl2303", ENV{ID_MM_DEVICE_IGNORE}="1"
