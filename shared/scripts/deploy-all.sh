@@ -70,6 +70,15 @@ echo "[4/6] Rendering configs..."
 bash "$EDGE_DIR/render-configs.sh"
 echo "  OK"
 
+# OOB console host layer: MUST run before the containers start. Without it
+# the table-200 ip rule + blackhole don't exist and the oob pair would come
+# up FAIL-OPEN, egressing the customer LAN via docker MASQUERADE instead of
+# 4G (review 2026-08-13 finding #2). Same gate + fail-loud semantics as
+# update.sh step [3/6].
+if grep -qE '^DEPLOY_OOB_CONSOLE=enabled' "$EDGE_DIR/.env" 2>/dev/null; then
+    bash "$EDGE_DIR/oob-console/host/setup-oob.sh"
+fi
+
 # --- Ensure directories exist with correct permissions --------------------
 echo ""
 echo "[5/6] Starting remaining containers..."

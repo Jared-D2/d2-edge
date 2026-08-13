@@ -27,7 +27,7 @@ d2-agent/buffer/
 
 # OOB console — per-site / rendered
 oob-console/ports.yaml
-oob-console/ser2net.yaml
+oob-console/rendered/
 oob-console/slots.rules
 oob-console/logs/
 oob-console/ts-state/

@@ -155,6 +155,10 @@ fi
 # Only when the operator has switched the OOB stack on. Both directions:
 # enabled-without-HAT aborts (flag on wrong Pi / HAT not seated);
 # HAT-without-enabled is a non-fatal notice (freshly fitted, not yet on).
+# Uses the shared envfile.sh parser — a raw grep here dies SILENTLY under
+# pipefail when a key line is absent entirely (review 2026-08-13 finding
+# #4), bypassing the fail() aggregation contract; env_get returns empty
+# with rc 0 for absent keys and matches compose's dotenv semantics.
 if [[ -f "$ENV_FILE" ]]; then
     oob_flag=$(deploy_flag DEPLOY_OOB_CONSOLE disabled)
     hat_present=false
@@ -164,7 +168,7 @@ if [[ -f "$ENV_FILE" ]]; then
     if [[ "$oob_flag" == "enabled" ]]; then
         for k in OOB_APN TS_OOB_AUTHKEY; do
             v=$(env_get "$k")
-            [[ -n "$v" && "$v" != "REPLACE_ME" ]] || fail "DEPLOY_OOB_CONSOLE=enabled but $k is empty"
+            [[ -n "$v" && "$v" != "REPLACE_ME" ]] || fail "DEPLOY_OOB_CONSOLE=enabled but $k is missing or empty"
         done
         [[ -f "$COMPOSE_DIR/oob-console/ports.yaml" ]] \
             || fail "DEPLOY_OOB_CONSOLE=enabled but oob-console/ports.yaml missing"

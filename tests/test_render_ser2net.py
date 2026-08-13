@@ -48,4 +48,14 @@ assert r2.returncode != 0 and "duplicate" in r2.stderr.lower()
 r3, _, _ = render(SAMPLE.replace("slot: 2", "slot: 17"))
 assert r3.returncode != 0 and "range" in r3.stderr.lower()
 
+# device names that would break YAML quoting or escape the log dir must fail
+r4, _, _ = render(SAMPLE.replace("ncm-cx01", 'ncm "core" fw'))
+assert r4.returncode != 0 and "invalid" in r4.stderr.lower()
+r5, _, _ = render(SAMPLE.replace("ncm-cx01", "audit/../fgt01"))
+assert r5.returncode != 0 and "invalid" in r5.stderr.lower()
+
+# stale-session and idle-session protections must be present on every slot
+assert ser2net.count("kickolduser: true") == 2
+assert ser2net.count("mdns: false") == 2
+
 print("OK")

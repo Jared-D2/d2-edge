@@ -1,36 +1,86 @@
 #!/usr/bin/env bash
 # oob-watchdog.sh — runs every 5 min via oob-watchdog.timer.
-# Pings via wwan0; after 3 consecutive failures soft-resets the modem
-# (AT+CFUN=1,1); after 2 failed soft-reset cycles, PWRKEY power-cycle.
-# State in /run/d2-oob (tmpfs — resets on reboot, intentionally).
+#
+# Non-destructive by design (review 2026-08-13 finding #1): a modem that is
+# visible on USB is NEVER PWRKEY'd — a 3 s PWRKEY hold on a running SIM7600
+# is power-OFF, permanently, with nothing to turn it back on. PWRKEY is used
+# ONLY to power ON a modem that is absent from the USB bus, at most once per
+# hour. "Not registered" is a carrier/SIM condition, not a modem wedge, and
+# gets no intervention (the old gate keyed on wwan0-has-IP, which the RNDIS
+# internal DHCP satisfies even with no SIM).
+#
+# Ladder: absent from USB → PWRKEY power-on pulse (1/h max)
+#         on USB, AT dead  → USB re-authorize reset
+#         registered, no data ×3 → AT+CFUN=1,1 ×2 → USB re-authorize reset
 set -u
 STATE_DIR=/run/d2-oob; mkdir -p "$STATE_DIR"
-FAILS_F="$STATE_DIR/ping_fails"; RESETS_F="$STATE_DIR/cfun_resets"
-fails=$(cat "$FAILS_F" 2>/dev/null || echo 0)
-resets=$(cat "$RESETS_F" 2>/dev/null || echo 0)
+AT=/usr/local/sbin/oob-at.py
+log() { logger -t oob-watchdog "$*"; }
 
-# No HAT → nothing to watch (unit is only installed when OOB enabled,
-# but stay safe on a Pi where the HAT was pulled).
-[[ -e /dev/d2-modem ]] || exit 0
+count() { cat "$STATE_DIR/$1" 2>/dev/null || echo 0; }
+setc()  { echo "$2" > "$STATE_DIR/$1"; }
 
-# No SIM/carrier yet is NOT a wedge — skip until wwan0 has an address.
-ip -4 addr show dev wwan0 2>/dev/null | grep -q inet || exit 0
+modem_usb_dirs() {
+    local d
+    for d in /sys/bus/usb/devices/*; do
+        [[ "$(cat "$d/idVendor" 2>/dev/null)" == "1e0e" ]] && echo "$d"
+    done
+}
 
-if ping -I wwan0 -c 2 -W 5 1.1.1.1 >/dev/null 2>&1; then
-    echo 0 > "$FAILS_F"; echo 0 > "$RESETS_F"; exit 0
+usb_reset() {
+    local d
+    log "USB re-authorize reset of modem"
+    for d in $(modem_usb_dirs); do
+        echo 0 > "$d/authorized" 2>/dev/null
+        sleep 2
+        echo 1 > "$d/authorized" 2>/dev/null
+    done
+}
+
+# --- 1. modem absent from USB: power-ON pulse, rate-limited --------------
+if [[ -z "$(modem_usb_dirs)" ]]; then
+    now=$(date +%s)
+    if (( now - $(count pwrkey_last) > 3600 )); then
+        setc pwrkey_last "$now"
+        gpio="${OOB_PWRKEY_GPIO:-6}"
+        log "modem absent from USB — PWRKEY power-on pulse (GPIO $gpio)"
+        pinctrl set "$gpio" op dh; sleep 3; pinctrl set "$gpio" dl
+    fi
+    exit 0
 fi
-fails=$((fails + 1)); echo "$fails" > "$FAILS_F"
-logger -t oob-watchdog "wwan0 ping failure $fails/3"
-(( fails < 3 )) && exit 0
 
-echo 0 > "$FAILS_F"
-if (( resets < 2 )); then
-    echo $((resets + 1)) > "$RESETS_F"
-    logger -t oob-watchdog "soft-resetting modem (AT+CFUN=1,1), attempt $((resets + 1))/2"
-    printf 'AT+CFUN=1,1\r' > /dev/d2-modem
+# --- 2. on USB but AT dead: USB-level reset (never PWRKEY) ---------------
+if [[ ! -e /dev/d2-modem ]] || ! "$AT" AT 2>/dev/null | grep -q OK; then
+    setc at_fails "$(( $(count at_fails) + 1 ))"
+    (( $(count at_fails) < 2 )) && exit 0   # tolerate a single blip
+    setc at_fails 0
+    log "modem on USB but AT unresponsive"
+    usb_reset
+    exit 0
+fi
+setc at_fails 0
+
+# --- 3. not registered: carrier/SIM side — no intervention ---------------
+if ! "$AT" 'AT+CEREG?' 2>/dev/null | grep -qE '\+CEREG: [0-9],[15]'; then
+    setc ping_fails 0
+    exit 0
+fi
+
+# --- 4. registered but no data path: CFUN ×2, then USB reset -------------
+if ping -I wwan0 -c 2 -W 5 1.1.1.1 >/dev/null 2>&1; then
+    setc ping_fails 0; setc cfun_resets 0
+    exit 0
+fi
+setc ping_fails "$(( $(count ping_fails) + 1 ))"
+log "registered but wwan0 ping failure $(count ping_fails)/3"
+(( $(count ping_fails) < 3 )) && exit 0
+setc ping_fails 0
+
+if (( $(count cfun_resets) < 2 )); then
+    setc cfun_resets "$(( $(count cfun_resets) + 1 ))"
+    log "soft-resetting modem (AT+CFUN=1,1), attempt $(count cfun_resets)/2"
+    "$AT" 'AT+CFUN=1,1' >/dev/null 2>&1
 else
-    echo 0 > "$RESETS_F"
-    gpio="${OOB_PWRKEY_GPIO:-6}"
-    logger -t oob-watchdog "soft resets exhausted — PWRKEY power-cycle on GPIO $gpio"
-    pinctrl set "$gpio" op dh; sleep 3; pinctrl set "$gpio" dl
+    setc cfun_resets 0
+    usb_reset
 fi

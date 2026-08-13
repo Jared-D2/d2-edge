@@ -355,7 +355,11 @@ services:
       - "c 166:* rwm"
     volumes:
       - /dev:/dev:ro
-      - ./oob-console/ser2net.yaml:/etc/ser2net/ser2net.yaml:ro
+      # directory mount, not single-file: a missing single-file bind makes
+      # docker create a root-owned DIRECTORY at the path, permanently
+      # wedging the renderer (review finding #6). setup-oob.sh always
+      # creates rendered/ before the container can start.
+      - ./oob-console/rendered:/etc/ser2net:ro
       - ./oob-console/logs:/var/log/oob-console
 
 networks:
