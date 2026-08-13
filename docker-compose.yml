@@ -70,7 +70,7 @@ services:
 
   # ─── Zabbix proxy ─────────────────────────────────────────────────────────
   zabbix-proxy:
-    image: zabbix/zabbix-proxy-sqlite3:alpine-7.4-latest@sha256:3916f37cde80a125c5ec92c4d4c4225dd58cb1fbaad7bb8154b6b010b3a245a8
+    image: zabbix/zabbix-proxy-sqlite3:alpine-7.4-latest@sha256:8dc37f6c9eb2c54fe9877701743e3641aae990350f7f74f37ee4ea7e62929f10
     container_name: zabbix-proxy
     profiles: ["${DEPLOY_ZABBIX_PROXY:-enabled}"]
     restart: unless-stopped
@@ -204,7 +204,7 @@ services:
     # Pinned by digest (multi-arch manifest list, incl. arm64). To re-pin when
     # bumping the tag: docker manifest inspect zabbix/zabbix-agent2:<new-tag>
     # and update the digest below to the top-level manifest-list digest.
-    image: zabbix/zabbix-agent2:ubuntu-7.4-latest@sha256:51960599a3e803797b614f085fa5fd7dd6135e669990fe45c0e4d5c9c39b0e4b
+    image: zabbix/zabbix-agent2:ubuntu-7.4-latest@sha256:94ca3bb304ca4d253f344ee8077bcef2be1c8a3942e17d29a8363e842044e8b5
     container_name: zabbix-agent2
     profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped
