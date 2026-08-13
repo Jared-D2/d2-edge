@@ -8,6 +8,13 @@ Type=oneshot
 RemainAfterExit=yes
 # Idempotent: replace semantics via del-then-add.
 ExecStart=/bin/sh -c 'ip rule del from 172.31.250.0/29 lookup 200 2>/dev/null; ip rule add from 172.31.250.0/29 lookup 200 priority 200'
+# throw: on-subnet lookups fall through to the main table so the br-oob
+# connected route resolves — without this, the kernel's reverse-path
+# validation for the bridge subnet lands in table 200, finds no br-oob
+# route, and silently refuses to answer the containers' ARP (pilot-caught:
+# gateway ARP INCOMPLETE, zero container egress). Off-subnet lookups still
+# hit the wwan0 default / blackhole — isolation is unchanged.
+ExecStart=/bin/sh -c 'ip route replace throw 172.31.250.0/29 table 200'
 ExecStart=/bin/sh -c 'ip route replace blackhole default metric 1000 table 200'
 
 [Install]
