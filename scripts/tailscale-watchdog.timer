@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Tailscale wedge watchdog every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Unit=tailscale-watchdog.service
+
+[Install]
+WantedBy=timers.target

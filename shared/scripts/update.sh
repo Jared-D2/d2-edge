@@ -90,6 +90,21 @@ if [[ -f "$EDGE_DIR/.env" ]] && grep -q '^CONTROLLER_URL=wss://10\.255\.255\.36:
     echo "  migrated CONTROLLER_URL to hostname (uxi.internal.d2tech.com.au)"
 fi
 
+# Tailscale node durability: OAuth-client authkeys register EPHEMERAL nodes
+# by default, and the control plane DELETES an ephemeral node after an
+# outage takes it offline. tailscaled then wedges in a "PollNetMap: 404
+# node not found" loop when the WAN returns, until something re-runs
+# `tailscale up --authkey` (wer001-wr-pi01 2026-08-14: 7.5 h dark after a
+# WAN failover for exactly this reason). Appending ?ephemeral=false makes
+# the NEXT (re-)registration durable; already-registered nodes convert
+# whenever they next re-login (the tailscale-watchdog forces that on
+# wedge, so the fleet converges without proactive churn). Idempotent:
+# only touches a bare tskey-client value with no existing params.
+if [[ -f "$EDGE_DIR/.env" ]] && grep -Eq '^TS_AUTHKEY=tskey-client-[A-Za-z0-9-]+$' "$EDGE_DIR/.env"; then
+    sed -i -E 's|^(TS_AUTHKEY=tskey-client-[A-Za-z0-9-]+)$|\1?ephemeral=false|' "$EDGE_DIR/.env"
+    echo "  migrated TS_AUTHKEY: appended ?ephemeral=false (durable node registration)"
+fi
+
 echo
 echo "[2/6] Validating .env and host state..."
 bash "$EDGE_DIR/shared/scripts/preflight.sh"
@@ -126,6 +141,16 @@ fi
 # timer never enabled, leaving the collector silently offline for ~24h.
 if [[ -x "$EDGE_DIR/scripts/install-auvik-watchdog.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-auvik-watchdog.sh"
+fi
+# Tailscale wedge watchdog: restarts the tailscale container when tailscaled
+# is logged-out/offline while the control plane is reachable — the state an
+# ephemeral-node deletion leaves behind after a WAN outage (404 node-not-
+# found loop; Docker's healthcheck reads "healthy" throughout). Pairs with
+# the TS_AUTHKEY ?ephemeral=false migration above: the forced re-login also
+# converts legacy ephemeral nodes to durable ones. See
+# scripts/tailscale-watchdog.sh for the full trigger/backoff contract.
+if [[ -x "$EDGE_DIR/scripts/install-tailscale-watchdog.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-tailscale-watchdog.sh"
 fi
 
 # Ansible service account: idempotent provision of svc_ansible (sudo limited
