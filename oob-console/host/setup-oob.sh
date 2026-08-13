@@ -28,6 +28,19 @@ udevadm control --reload && udevadm trigger --subsystem-match=tty
 # Give udev a moment to settle symlinks before the verify block.
 udevadm settle --timeout=10 || true
 
+# 2.5. NetworkManager guard: stop NM activating wired profiles on wwan0
+#      (it hijacked netplan-eth0 onto the modem on the pilot Pi, taking
+#      eth0 down). Only relevant where NM exists; restart is safe — NM
+#      keeps device state across restarts.
+if command -v nmcli >/dev/null 2>&1; then
+    mkdir -p /etc/NetworkManager/conf.d
+    if ! cmp -s "$HOSTD/90-d2-oob-nm.conf" /etc/NetworkManager/conf.d/90-d2-oob.conf 2>/dev/null; then
+        install -m 0644 "$HOSTD/90-d2-oob-nm.conf" /etc/NetworkManager/conf.d/90-d2-oob.conf
+        systemctl try-restart NetworkManager 2>/dev/null || true
+        echo "[oob] installed NetworkManager unmanaged-devices guard"
+    fi
+fi
+
 # 3. networkd: pin wwan0 name + DHCP-into-table-200. The conf.d drop-in
 #    stops networkd deleting our "foreign" table-200 rule/blackhole on
 #    every interface reconfigure (ManageForeignRoutingPolicyRules default
