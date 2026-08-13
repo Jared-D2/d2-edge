@@ -17,13 +17,9 @@ LOG_TAG=auvik-ensure-tenant
 
 log(){ logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; echo "[$(date -u +%FT%TZ)] $*"; }
 
-# Read KEY=VALUE from .env WITHOUT sourcing (never execute .env content).
-env_get(){
-  local key="$1"
-  [[ -f "$ENV_FILE" ]] || return 0
-  sed -n -E "s/^${key}=([^#]*)\$/\1/p" "$ENV_FILE" | tail -n1 \
-    | sed -E "s/[[:space:]]+\$//; s/^\"(.*)\"\$/\1/; s/^'(.*)'\$/\1/"
-}
+# env_get from the shared lib — reads $ENV_FILE without sourcing it (never
+# execute .env content), with compose-dotenv quote/comment semantics.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/shared/scripts/lib/envfile.sh"
 
 PREFIX="${AUVIK_DOMAIN_PREFIX:-$(env_get AUVIK_DOMAIN_PREFIX)}"
 DEPLOY="${DEPLOY_AUVIK:-$(env_get DEPLOY_AUVIK)}"; DEPLOY="${DEPLOY:-enabled}"

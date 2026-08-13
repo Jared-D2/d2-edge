@@ -2,6 +2,13 @@
 set -euo pipefail
 
 EDGE_DIR=/opt/d2-edge
+ENV_FILE="$EDGE_DIR/.env"
+
+# Single .env parser (env_get / deploy_flag) — MUST agree with docker
+# compose's dotenv semantics (quotes/comments/whitespace). A private
+# grep-based parser here once classified DEPLOY_X="enabled" (quoted) as
+# disabled and tore the service down while compose considered it enabled.
+. "$EDGE_DIR/shared/scripts/lib/envfile.sh"
 
 # Docker group GID varies per host install — resolve at deploy time.
 export DOCKER_GID=$(getent group docker | cut -d: -f3)
@@ -190,7 +197,7 @@ fi
 # operator has enabled OOB on this Pi; every other Pi is untouched.
 # Unlike the fail-soft heals above this one is fail-LOUD (no || true):
 # a half-installed OOB layer must abort the deploy, not limp.
-if grep -qE '^DEPLOY_OOB_CONSOLE=enabled' "$EDGE_DIR/.env" 2>/dev/null; then
+if [[ "$(deploy_flag DEPLOY_OOB_CONSOLE disabled)" == "enabled" ]]; then
     bash "$EDGE_DIR/oob-console/host/setup-oob.sh"
 fi
 echo "  OK"
@@ -209,15 +216,11 @@ echo "  OK"
 # `up`. Partition the set here instead: recreate what is enabled, stop and
 # remove what is not, so the .env flags are self-enforcing.
 #
-# Value semantics match docker-compose.yml's ${VAR:-enabled}: a missing key
-# counts as enabled; anything other than the literal 'enabled'
-# (conventionally 'disabled') counts as off.
-deploy_flag() {
-    local val
-    val=$(grep -E "^${1}=" "$EDGE_DIR/.env" 2>/dev/null | tail -1 \
-          | cut -d= -f2- | tr -d '[:space:]')
-    echo "${val:-enabled}"
-}
+# Value semantics match docker-compose.yml's ${VAR:-enabled} exactly —
+# deploy_flag (lib/envfile.sh, sourced above) parses quotes/comments/
+# whitespace the way compose's dotenv loader does, and its DEFAULT argument
+# mirrors each profile's fallback. Anything other than 'enabled' counts as
+# off.
 # cert-server carries no `profiles:` key — unconditional, like tailscale.
 RECREATE=(cert-server)
 DISABLED=()
@@ -233,15 +236,10 @@ for entry in auvik:DEPLOY_AUVIK d2-agent:DEPLOY_D2_AGENT \
         DISABLED+=("${entry%%:*}")
     fi
 done
-# OOB pair: deploy_flag defaults ABSENT keys to 'enabled' (correct for the
-# original eight, wrong for a disabled-by-default service). preflight heals
-# the key into every .env, but guard the absent-key window explicitly: no
-# key means OFF. Both containers move together with the one toggle.
-oob_flag=$(deploy_flag DEPLOY_OOB_CONSOLE)
-if ! grep -qE '^DEPLOY_OOB_CONSOLE=' "$EDGE_DIR/.env" 2>/dev/null; then
-    oob_flag=disabled
-fi
-if [[ "$oob_flag" == "enabled" ]]; then
+# OOB pair: absent key means OFF (deploy_flag's second arg matches the
+# compose-side ${DEPLOY_OOB_CONSOLE:-disabled}). Both containers move
+# together with the one toggle.
+if [[ "$(deploy_flag DEPLOY_OOB_CONSOLE disabled)" == "enabled" ]]; then
     RECREATE+=(oob-tailscale oob-console)
 else
     DISABLED+=(oob-tailscale oob-console)

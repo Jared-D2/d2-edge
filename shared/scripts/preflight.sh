@@ -13,6 +13,11 @@ set -euo pipefail
 ENV_FILE="${ENV_FILE:-/opt/d2-edge/.env}"
 COMPOSE_DIR="${COMPOSE_DIR:-/opt/d2-edge}"
 
+# Single .env parser (env_get / deploy_flag) shared with update.sh — parses
+# quotes/comments/whitespace with docker compose's dotenv semantics so
+# validation here can never disagree with what compose actually deploys.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/envfile.sh"
+
 errors=()
 fail() { errors+=("$1"); }
 
@@ -92,7 +97,7 @@ if [[ -f "$ENV_FILE" ]]; then
     # the tenant's NetBox site slug (steelriver, etc.). Heal so that Pis
     # provisioned before NETBOX_SITE_SLUG was a required key recover via
     # `git pull && update.sh` instead of needing manual .env editing.
-    existing_site_id=$(grep -E '^EDGE_SITE_ID=' "$ENV_FILE" | tail -1 | cut -d= -f2-)
+    existing_site_id=$(env_get EDGE_SITE_ID)
     [[ -n "$existing_site_id" ]] && heal_defaults[NETBOX_SITE_SLUG]="$existing_site_id"
 
     for k in "${!heal_defaults[@]}"; do
@@ -151,14 +156,14 @@ fi
 # enabled-without-HAT aborts (flag on wrong Pi / HAT not seated);
 # HAT-without-enabled is a non-fatal notice (freshly fitted, not yet on).
 if [[ -f "$ENV_FILE" ]]; then
-    oob_flag=$(grep -E '^DEPLOY_OOB_CONSOLE=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]')
+    oob_flag=$(deploy_flag DEPLOY_OOB_CONSOLE disabled)
     hat_present=false
     for _v in /sys/bus/usb/devices/*/idVendor; do
         [[ -f "$_v" && "$(cat "$_v" 2>/dev/null)" == "1e0e" ]] && hat_present=true && break
     done
-    if [[ "${oob_flag:-disabled}" == "enabled" ]]; then
+    if [[ "$oob_flag" == "enabled" ]]; then
         for k in OOB_APN TS_OOB_AUTHKEY; do
-            v=$(grep -E "^${k}=" "$ENV_FILE" | tail -1 | cut -d= -f2-)
+            v=$(env_get "$k")
             [[ -n "$v" && "$v" != "REPLACE_ME" ]] || fail "DEPLOY_OOB_CONSOLE=enabled but $k is empty"
         done
         [[ -f "$COMPOSE_DIR/oob-console/ports.yaml" ]] \

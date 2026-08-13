@@ -26,13 +26,8 @@ log() { echo "[wazuh] $*"; }
 
 if [[ $EUID -ne 0 ]]; then log "must run as root -- skipping" >&2; exit 0; fi
 
-# Read a KEY=value from .env (last occurrence wins), stripping surrounding quotes.
-env_get() {
-    local k="$1"
-    [[ -f "$ENV_FILE" ]] || return 0
-    grep -E "^${k}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- \
-        | sed -e 's/^["'\'']//' -e 's/["'\'']$//'
-}
+# env_get from the shared lib (compose-dotenv semantics; reads $ENV_FILE).
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/shared/scripts/lib/envfile.sh"
 
 # --- gate ------------------------------------------------------------------
 DEPLOY_WAZUH="$(env_get DEPLOY_WAZUH)"; DEPLOY_WAZUH="${DEPLOY_WAZUH:-enabled}"
