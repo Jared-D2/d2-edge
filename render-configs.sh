@@ -126,3 +126,20 @@ done
 echo "[freeradius] rendered OK"
 
 echo "All configs rendered and validated"
+
+# ─── oob-console (ser2net) ────────────────────────────────────────────────
+# Only when the OOB toggle is on AND the operator has written ports.yaml.
+# Renders ser2net.yaml (mounted into the container) + slots.rules (udev
+# fragment installed by setup-oob.sh on the next update.sh run).
+if [[ "${DEPLOY_OOB_CONSOLE:-disabled}" == "enabled" ]]; then
+    if [[ -f "${EDGE_DIR}/oob-console/ports.yaml" ]]; then
+        python3 "${EDGE_DIR}/oob-console/render-ser2net.py" \
+            "${EDGE_DIR}/oob-console/ports.yaml" \
+            "${EDGE_DIR}/oob-console/ser2net.yaml" \
+            "${EDGE_DIR}/oob-console/slots.rules"
+        echo "[oob] rendered OK ($(grep -c '^connection:' "${EDGE_DIR}/oob-console/ser2net.yaml") slots)"
+    else
+        echo "[ERROR] DEPLOY_OOB_CONSOLE=enabled but oob-console/ports.yaml missing" >&2
+        exit 1
+    fi
+fi

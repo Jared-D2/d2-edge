@@ -59,6 +59,8 @@ services:
       - ./syslog-proxy/config:/config
       - ./syslog-proxy/logs:/var/log/syslog-proxy
       - ./syslog-proxy/state:/var/lib/syslog-ng
+      # OOB console transcripts (empty dir on non-OOB Pis; see s_oob_console)
+      - ./oob-console/logs:/var/log/oob-console:ro
     healthcheck:
       test: ["CMD-SHELL", "syslog-ng-ctl stats --control=/config/syslog-ng.ctl >/dev/null 2>&1"]
       interval: 30s
