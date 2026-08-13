@@ -24,3 +24,10 @@ netflow-proxy/nginx.conf
 # Runtime restore points and buffer DB
 *.before-*
 d2-agent/buffer/
+
+# OOB console — per-site / rendered
+oob-console/ports.yaml
+oob-console/ser2net.yaml
+oob-console/slots.rules
+oob-console/logs/
+oob-console/ts-state/

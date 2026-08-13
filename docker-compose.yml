@@ -59,6 +59,8 @@ services:
       - ./syslog-proxy/config:/config
       - ./syslog-proxy/logs:/var/log/syslog-proxy
       - ./syslog-proxy/state:/var/lib/syslog-ng
+      # OOB console transcripts (empty dir on non-OOB Pis; see s_oob_console)
+      - ./oob-console/logs:/var/log/oob-console:ro
     healthcheck:
       test: ["CMD-SHELL", "syslog-ng-ctl stats --control=/config/syslog-ng.ctl >/dev/null 2>&1"]
       interval: 30s
@@ -159,6 +161,8 @@ services:
     profiles: ["${DEPLOY_D2_AGENT:-enabled}"]
     restart: unless-stopped
     network_mode: host
+    extra_hosts:
+      - "uxi.internal.d2tech.com.au:10.255.255.36"
     # NET_ADMIN is required for `iw dev wlan0 scan` (nl80211 netlink). Without
     # it, scans fail with EPERM and rf_scan capability reports false even
     # though wlan0 is detected. NET_RAW is not needed for iw-based scanning.
@@ -197,7 +201,10 @@ services:
 
   # ─── Zabbix agent 2 ───────────────────────────────────────────────────────
   zabbix-agent2:
-    image: zabbix/zabbix-agent2:ubuntu-7.4-latest
+    # Pinned by digest (multi-arch manifest list, incl. arm64). To re-pin when
+    # bumping the tag: docker manifest inspect zabbix/zabbix-agent2:<new-tag>
+    # and update the digest below to the top-level manifest-list digest.
+    image: zabbix/zabbix-agent2:ubuntu-7.4-latest@sha256:51960599a3e803797b614f085fa5fd7dd6135e669990fe45c0e4d5c9c39b0e4b
     container_name: zabbix-agent2
     profiles: ["${DEPLOY_ZABBIX_AGENT2:-enabled}"]
     restart: unless-stopped
@@ -259,7 +266,10 @@ services:
   # 192.168.166.34 → d2001). nginx.conf is rendered by render-configs.sh
   # from netflow-proxy/nginx.conf.template.
   netflow-proxy:
-    image: nginx:1.27-alpine
+    # Pinned by digest (multi-arch manifest list, incl. arm64). To re-pin when
+    # bumping the tag: docker manifest inspect nginx:<new-tag> and update the
+    # digest below to the top-level manifest-list digest.
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     container_name: netflow-proxy
     profiles: ["${DEPLOY_NETFLOW_PROXY:-enabled}"]
     hostname: netflow-proxy
@@ -273,3 +283,86 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # ─── OOB console (4G HAT) ─────────────────────────────────────────────────
+  # Opt-in per Pi: profiles default DISABLED (unlike every other service).
+  # oob-tailscale owns an ISOLATED netns on the br-oob bridge — deliberately
+  # NOT network_mode:host. The host ip rule steers 172.31.250.0/29 into
+  # table 200 (wwan0-or-blackhole), so this pair can only ever egress via
+  # 4G, and nothing else on the Pi can. Own node identity <hostname>-oob,
+  # tag:oob, minted by the DEDICATED oob OAuth client (TS_OOB_AUTHKEY).
+  oob-tailscale:
+    image: tailscale/tailscale:v1.96.5@sha256:dbeff02d2337344b351afac203427218c4d0a06c43fc10a865184063498472a6
+    container_name: oob-tailscale
+    profiles: ["${DEPLOY_OOB_CONSOLE:-disabled}"]
+    hostname: ${EDGE_HOSTNAME}-oob
+    restart: unless-stopped
+    networks:
+      - oob
+    dns:
+      - 1.1.1.1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./oob-console/ts-state:/var/lib/tailscale
+    environment:
+      - TS_AUTHKEY=${TS_OOB_AUTHKEY:-}
+      - TS_HOSTNAME=${EDGE_HOSTNAME}-oob
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+    # In-band fallback: consoles reachable from the Pi itself via
+    # `telnet localhost 300N` (SSH in normally) — loopback-only publish,
+    # does not weaken the 4G-only rule for remote access.
+    ports:
+      - "127.0.0.1:3001-3016:3001-3016"
+    command: >
+      sh -c "tailscaled &
+      until tailscale status --json >/dev/null 2>&1; do sleep 2; done;
+      tailscale up
+      --authkey=$$TS_AUTHKEY
+      --hostname=$$TS_HOSTNAME
+      --advertise-tags=tag:oob && wait"
+    healthcheck:
+      test: ["CMD", "tailscale", "status", "--json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ser2net console server sharing oob-tailscale's netns. /dev is a ro
+  # bind (device I/O still works; ro only blocks fs writes) because the
+  # /dev/d2-console/* symlinks are relative and need their /dev/ttyUSB*
+  # targets visible. cgroup rules grant char majors 188 (ttyUSB) and
+  # 166 (ttyACM); hotplugged adapters appear without a recreate.
+  oob-console:
+    build: ./oob-console
+    image: d2-edge-oob-console
+    container_name: oob-console
+    profiles: ["${DEPLOY_OOB_CONSOLE:-disabled}"]
+    restart: unless-stopped
+    network_mode: "service:oob-tailscale"
+    depends_on:
+      oob-tailscale:
+        condition: service_healthy
+        # restart oob-console whenever oob-tailscale recreates — it lives
+        # in that container's netns; a solo oob-tailscale restart otherwise
+        # leaves ser2net serving a dead namespace (pilot-caught).
+        restart: true
+    device_cgroup_rules:
+      - "c 188:* rwm"
+      - "c 166:* rwm"
+    volumes:
+      - /dev:/dev:ro
+      - ./oob-console/ser2net.yaml:/etc/ser2net/ser2net.yaml:ro
+      - ./oob-console/logs:/var/log/oob-console
+
+networks:
+  oob:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-oob
+    ipam:
+      config:
+        - subnet: 172.31.250.0/29

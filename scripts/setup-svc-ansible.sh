@@ -42,7 +42,7 @@ fi
 
 # 4. sudo restricted to ONLY update.sh (staged + validated before install)
 SUDOERS=/etc/sudoers.d/svc_ansible
-WANT="$SVC_USER ALL=(root) NOPASSWD: $UPDATE_SCRIPT"
+WANT="$SVC_USER ALL=(root) NOPASSWD: $UPDATE_SCRIPT, /usr/local/sbin/lego-radsec-enroll.sh"
 if [[ ! -f "$SUDOERS" ]] || ! grep -qxF "$WANT" "$SUDOERS"; then
     TMP=/etc/sudoers.d/.svc_ansible.tmp
     printf '%s\n' "$WANT" > "$TMP"

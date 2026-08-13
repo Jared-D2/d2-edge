@@ -73,6 +73,16 @@ else
 fi
 echo "  OK ($SHA)"
 
+# Migrate legacy IP-based CONTROLLER_URL to the hostname form. The controller
+# cert is hostname-based (uxi.internal.d2tech.com.au); the IP SAN is being
+# retired. extra_hosts on the d2-agent service maps the name -> 10.255.255.36
+# so resolution works without fleet DNS. Idempotent: only rewrites the exact
+# legacy IP URL, leaves anything else (already-migrated, lab overrides) alone.
+if [[ -f "$EDGE_DIR/.env" ]] && grep -q '^CONTROLLER_URL=wss://10\.255\.255\.36:9000/ws/agent' "$EDGE_DIR/.env"; then
+    sed -i 's|^CONTROLLER_URL=wss://10\.255\.255\.36:9000/ws/agent|CONTROLLER_URL=wss://uxi.internal.d2tech.com.au:9000/ws/agent|' "$EDGE_DIR/.env"
+    echo "  migrated CONTROLLER_URL to hostname (uxi.internal.d2tech.com.au)"
+fi
+
 echo
 echo "[2/6] Validating .env and host state..."
 bash "$EDGE_DIR/shared/scripts/preflight.sh"
@@ -118,6 +128,26 @@ fi
 if [[ -x "$EDGE_DIR/scripts/setup-svc-ansible.sh" ]]; then
     bash "$EDGE_DIR/scripts/setup-svc-ansible.sh"
 fi
+# Wazuh agent: idempotent, FAIL-SOFT install + enrolment of the native Wazuh
+# agent for host security monitoring (package/CVE inventory, FIM, auditd).
+# Gated by DEPLOY_WAZUH in .env (default enabled). Self-arms like the heals
+# above; exits 0 cleanly if already connected or if the manager
+# (10.255.255.28) isn't reachable yet -- the `|| true` is belt-and-suspenders
+# so Wazuh can never abort a fleet deploy. See spec
+# docs/superpowers/specs/2026-07-08-wazuh-agent-pi-fleet-rollout-design.md.
+if [[ -x "$EDGE_DIR/scripts/install-wazuh-agent.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-wazuh-agent.sh" || true
+fi
+# syslog-proxy local-log retention: installs the logrotate config + nightly
+# purge cron for /opt/d2-edge/syslog-proxy/logs. Needed as a heal (not just
+# in bootstrap) because every Pi built before 2026-07-20 has been growing
+# that tree unbounded at ~1.3 GB/day -- bootstrap's inline logrotate config
+# globbed one path component short of where syslog-ng writes, so it silently
+# matched nothing. Reports the backlog it will purge; never deletes during a
+# routine update (see --purge-now in the script).
+if [[ -x "$EDGE_DIR/scripts/install-syslog-retention.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-syslog-retention.sh" || true
+fi
 # Weekly full-upgrade timer: idempotent install of the systemd timer that
 # runs `apt full-upgrade` (all repos incl third-party Docker/Tailscale)
 # every Saturday 01:00 Australia/Sydney and schedules a 02:00 reboot if one
@@ -128,6 +158,41 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-weekly-upgrade.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-weekly-upgrade.sh"
 fi
+# Wi-Fi sensing radio: idempotent passive enable for RF-capable sensor Pis.
+# d2-agent scans wlan0 but never brings the radio up; the enablement was a
+# manual imaging step never captured here, so sites shipped soft-blocked
+# (ENETDOWN every ap_scan -> standing sensor_health incident). No-op on
+# wired-only Pis; NEVER associates. See nib001-mu-pi01 / ncm001-bc-pi01.
+if [[ -x "$EDGE_DIR/scripts/enable-rf-radio.sh" ]]; then
+    bash "$EDGE_DIR/scripts/enable-rf-radio.sh"
+fi
+
+# Internal CA/DNS hosts pin: lego RadSec renewal resolves step-ca by name but
+# edge Pis can't reach CoreDNS on :53; without the /etc/hosts pin (cloud-init
+# wipes it on reboot) renewal fails silently and the cert expires (cost a
+# ~3-week silent expiry on d2001 2026-06-26).
+if [[ -x "$EDGE_DIR/scripts/ensure-internal-hosts.sh" ]]; then
+    bash "$EDGE_DIR/scripts/ensure-internal-hosts.sh"
+fi
+# RadSec cert-expiry monitor: daily check + 2 escalating Zabbix alerts so a
+# silent renewal failure can't expire unnoticed. No-op on Pis without a cert.
+if [[ -x "$EDGE_DIR/scripts/install-radsec-cert-check.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-radsec-cert-check.sh"
+fi
+# RadSec cert scaffolding (lego): installs lego + per-Pi key + renew timer.
+# Self-arms everywhere but stays a no-op until the Pi key is registered with
+# acme-hook (gated enrollment via Ansible). See scripts/install-lego-radsec.sh.
+if [[ -x "$EDGE_DIR/scripts/install-lego-radsec.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-lego-radsec.sh"
+fi
+# OOB console host layer (4G HAT): idempotent install of udev/networkd/
+# routing/watchdog + modem mode pin. STRICTLY gated — only runs when the
+# operator has enabled OOB on this Pi; every other Pi is untouched.
+# Unlike the fail-soft heals above this one is fail-LOUD (no || true):
+# a half-installed OOB layer must abort the deploy, not limp.
+if grep -qE '^DEPLOY_OOB_CONSOLE=enabled' "$EDGE_DIR/.env" 2>/dev/null; then
+    bash "$EDGE_DIR/oob-console/host/setup-oob.sh"
+fi
 echo "  OK"
 
 echo
@@ -135,11 +200,72 @@ echo "[4/6] Re-rendering configs..."
 bash "$EDGE_DIR/render-configs.sh"
 echo "  OK"
 
+# --- Which services does this Pi run? -------------------------------------
+# The per-service DEPLOY_* keys in .env drive `profiles:` in
+# docker-compose.yml. Compose AUTO-ENABLES a service's profile whenever that
+# service is named on the command line, so the old unconditional
+# `up -d --force-recreate <all eight>` below silently resurrected every
+# disabled container on each update — the toggles only ever worked on a bare
+# `up`. Partition the set here instead: recreate what is enabled, stop and
+# remove what is not, so the .env flags are self-enforcing.
+#
+# Value semantics match docker-compose.yml's ${VAR:-enabled}: a missing key
+# counts as enabled; anything other than the literal 'enabled'
+# (conventionally 'disabled') counts as off.
+deploy_flag() {
+    local val
+    val=$(grep -E "^${1}=" "$EDGE_DIR/.env" 2>/dev/null | tail -1 \
+          | cut -d= -f2- | tr -d '[:space:]')
+    echo "${val:-enabled}"
+}
+# cert-server carries no `profiles:` key — unconditional, like tailscale.
+RECREATE=(cert-server)
+DISABLED=()
+for entry in auvik:DEPLOY_AUVIK d2-agent:DEPLOY_D2_AGENT \
+             freeradius-proxy:DEPLOY_FREERADIUS_PROXY \
+             netflow-proxy:DEPLOY_NETFLOW_PROXY \
+             syslog-proxy:DEPLOY_SYSLOG_PROXY \
+             zabbix-agent2:DEPLOY_ZABBIX_AGENT2 \
+             zabbix-proxy:DEPLOY_ZABBIX_PROXY; do
+    if [[ "$(deploy_flag "${entry##*:}")" == "enabled" ]]; then
+        RECREATE+=("${entry%%:*}")
+    else
+        DISABLED+=("${entry%%:*}")
+    fi
+done
+# OOB pair: deploy_flag defaults ABSENT keys to 'enabled' (correct for the
+# original eight, wrong for a disabled-by-default service). preflight heals
+# the key into every .env, but guard the absent-key window explicitly: no
+# key means OFF. Both containers move together with the one toggle.
+oob_flag=$(deploy_flag DEPLOY_OOB_CONSOLE)
+if ! grep -qE '^DEPLOY_OOB_CONSOLE=' "$EDGE_DIR/.env" 2>/dev/null; then
+    oob_flag=disabled
+fi
+if [[ "$oob_flag" == "enabled" ]]; then
+    RECREATE+=(oob-tailscale oob-console)
+else
+    DISABLED+=(oob-tailscale oob-console)
+fi
+echo
+echo "Services enabled:  ${RECREATE[*]}"
+if (( ${#DISABLED[@]} )); then
+    echo "Services disabled: ${DISABLED[*]}"
+fi
+
 echo
 echo "[5/6] Building d2-agent image..."
 cd "$EDGE_DIR"
-docker compose build d2-agent --pull
-echo "  OK"
+# Skip the multi-minute ARM build on Pis that do not run the agent.
+if [[ " ${RECREATE[*]} " == *" d2-agent "* ]]; then
+    docker compose build d2-agent --pull
+    echo "  OK"
+else
+    echo "  skipped (DEPLOY_D2_AGENT is not 'enabled')"
+fi
+if [[ " ${RECREATE[*]} " == *" oob-console "* ]]; then
+    docker compose build oob-console
+    echo "  OK (oob-console)"
+fi
 
 echo
 echo "[6/6] Recreating containers..."
@@ -165,9 +291,19 @@ export COMPOSE_PROFILES=enabled
 # tailnet — which has locked us out of fleet Pis remotely in the past.
 # Plain `up -d` on tailscale still recreates it if docker-compose.yml
 # itself changed, which is the only case where a restart is warranted.
-docker compose up -d --force-recreate \
-    auvik cert-server d2-agent freeradius-proxy netflow-proxy \
-    syslog-proxy zabbix-agent2 zabbix-proxy
+# Tenant-mismatch guard: reset stale auvik identity before (re)creating the
+# collector so a cloned/re-tenanted Pi registers into the correct tenant.
+if [[ -x "$EDGE_DIR/scripts/auvik-ensure-tenant.sh" ]]; then
+    bash "$EDGE_DIR/scripts/auvik-ensure-tenant.sh" || true
+fi
+docker compose up -d --force-recreate "${RECREATE[@]}"
+# Take down anything the operator switched off in .env. A bare `up` never
+# touches an already-running container that a profile now excludes, so
+# without this the service keeps running on stale config indefinitely.
+if (( ${#DISABLED[@]} )); then
+    docker compose stop "${DISABLED[@]}"
+    docker compose rm -f "${DISABLED[@]}"
+fi
 docker compose up -d tailscale
 echo "  OK"
 

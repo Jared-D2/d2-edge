@@ -1,0 +1,14 @@
+# Retention for the syslog-proxy local log copy (/opt/d2-edge/syslog-proxy/logs).
+#
+# These files are a byte-for-byte duplicate of what syslog-ng has already
+# shipped to Graylog (10.255.255.20:12203) — the d_local and d_graylog
+# destinations sit on the same log{} statement, so their processed counters
+# advance in lockstep. Graylog is the system of record; the local tree is a
+# short-window convenience for on-Pi troubleshooting only.
+#
+# Nothing purged it before this file existed, so the tree grew ~1.3 GB/day
+# indefinitely. Observed on ncm001-bc-pi01 2026-07-20: 36 GB of a 58 GB card.
+#
+# 7 days matches what has run on d2001-nw-pi01 since 2026-04-13.
+# Deletes files first, then prunes the empty dated directories they leave.
+0 4 * * * root find /opt/d2-edge/syslog-proxy/logs/ -type f -mtime +7 -delete 2>/dev/null; find /opt/d2-edge/syslog-proxy/logs/ -mindepth 1 -type d -empty -delete 2>/dev/null

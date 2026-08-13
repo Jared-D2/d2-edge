@@ -76,6 +76,11 @@ echo "[5/6] Starting remaining containers..."
 mkdir -p "$EDGE_DIR"/{syslog-proxy/{config,logs,state},zabbix-proxy/{config,data,logs},freeradius-proxy/config/{templates,rendered},auvik/{config,etc,logs}}
 chown -R 1997:1997 "$EDGE_DIR/zabbix-proxy/data" 2>/dev/null || true
 chown -R 1997:1997 "$EDGE_DIR/zabbix-proxy/logs" 2>/dev/null || true
+# Ensure the persisted Auvik identity matches the configured tenant before the
+# collector starts (prevents tenant-mismatch churn on cloned/re-tenanted Pis).
+if [[ -x "$EDGE_DIR/scripts/auvik-ensure-tenant.sh" ]]; then
+    bash "$EDGE_DIR/scripts/auvik-ensure-tenant.sh" || true
+fi
 docker compose up -d
 echo "  OK"
 

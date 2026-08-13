@@ -1,0 +1,17 @@
+# Per-site console map. Copy to ports.yaml (gitignored) and edit.
+# slot N ↔ /dev/d2-console/slotNN ↔ TCP 300N ↔ the hub port labelled N.
+# usb_path: from `udevadm info -q property /dev/ttyUSBx | grep ID_PATH=`
+#           after plugging the adapter into its labelled hub port.
+# Shaped to mirror NetBox ConsoleServerPort→ConsolePort so a phase-2
+# generator can emit this file from NetBox.
+slots:
+  - slot: 1
+    device: ncm-fgt01        # log filename + Graylog field, free text
+    baud: 9600
+    platform: fortigate
+    usb_path: platform-fd500000.usb-usb-0:1.1:1.0
+  - slot: 2
+    device: ncm-cx01
+    baud: 115200
+    platform: aruba-cx
+    usb_path: platform-fd500000.usb-usb-0:1.2:1.0

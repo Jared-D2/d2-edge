@@ -19,9 +19,11 @@
             cipher_server_preference = yes
             tls_min_version = "1.2"
             tls_max_version = "1.3"
-            # Mutual TLS: require the client to present a cert signed by our CA.
-            # Without this, any TCP client reaching 2083 could speak RADIUS/TLS
-            # and only be gated by the shared secret.
-            require_cert = yes
+            # Server-side TLS only (decided 2026-07-15): clients like AOS-CX
+            # present a self-signed device cert, so we do not require client
+            # certs. Access to 2083 is gated by the subnet-scoped client blocks.
+            # NB: the former "require_cert = yes" here was a silent no-op --
+            # FreeRADIUS 3 only knows require_client_cert.
+            require_client_cert = no
         }
     }

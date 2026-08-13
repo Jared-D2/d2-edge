@@ -57,21 +57,12 @@ echo "[netflow] rendered OK"
 # Build per-subnet client blocks for FreeRADIUS.
 # LOCAL_CLIENT_SUBNET can be a single CIDR ("10.0.0.0/8") OR a list
 # separated by spaces or commas ("10.0.0.0/8 192.168.1.0/24").
-# RADSEC_CLIENT_SECRET: self-heal on first run. Every Pi previously
-# inherited the hardcoded "radsec" literal; auto-generating and
-# persisting into .env avoids forcing a manual fleet-wide edit while
-# still giving each Pi a unique secret (same pattern bootstrap uses
-# for DOCKER_GID). Safe because RadSec is cert-gated and not yet
-# deployed anywhere, so rotating the secret doesn't break any
-# currently-connected client.
-if [[ -z "${RADSEC_CLIENT_SECRET:-}" ]]; then
-    RADSEC_CLIENT_SECRET="$(openssl rand -hex 32)"
-    export RADSEC_CLIENT_SECRET
-    if ! grep -q '^RADSEC_CLIENT_SECRET=' "${EDGE_DIR}/.env"; then
-        echo "RADSEC_CLIENT_SECRET=${RADSEC_CLIENT_SECRET}" >> "${EDGE_DIR}/.env"
-        echo "[render-configs] Generated RADSEC_CLIENT_SECRET and appended to .env"
-    fi
-fi
+# RadSec client secret is the literal "radsec" per RFC 6614 section 2.3 --
+# real TLS clients (AOS-CX radius-server host ... tls) hardcode it and offer
+# no way to configure anything else. Confirmed live 2026-07-15 on NCM-BEL-SW06:
+# a per-Pi random secret drops every packet with "invalid Message-Authenticator".
+# The actual gate for 2083 is TLS itself plus the subnet-scoped client blocks
+# below. (RADSEC_CLIENT_SECRET in existing .env files is vestigial/unused.)
 SUBNETS="${LOCAL_CLIENT_SUBNET//,/ }"
 LOCAL_CLIENTS_UDP_BLOCKS=""
 LOCAL_CLIENTS_RADSEC_BLOCKS=""
@@ -89,7 +80,7 @@ client local-network-${i} {
 client radsec-local-${i} {
     ipaddr = ${subnet}
     proto = tcp
-    secret = ${RADSEC_CLIENT_SECRET}
+    secret = radsec
     require_message_authenticator = yes
     limit {
         max_connections = 16
@@ -121,9 +112,34 @@ FR_TPL="${EDGE_DIR}/freeradius-proxy/config/templates"
 FR_OUT="${EDGE_DIR}/freeradius-proxy/config/rendered"
 mkdir -p "$FR_OUT"
 for f in clients.conf proxy.conf default; do
-    envsubst < "$FR_TPL/${f}.template" > "$FR_OUT/$f"
+    src="$FR_TPL/${f}.template"
+    # Per-Pi opt-in: send the Pi->central AUTH hop over RadSec (TLS/2083) instead
+    # of plain UDP/1812. Gated on a RadSec cert being present (else freeradius
+    # fails to start). Acct stays UDP/1813. Set RADSEC_UPSTREAM=true in .env.
+    if [[ "$f" == "proxy.conf" && "${RADSEC_UPSTREAM:-false}" == "true" && -f "$RADSEC_CERTS_DIR/radsec.crt" && -f "$RADSEC_CERTS_DIR/radsec.key" && -f "$RADSEC_CERTS_DIR/ca-bundle.pem" ]]; then
+        src="$FR_TPL/proxy.conf.radsec.template"
+        echo "[freeradius] proxy->central auth: RadSec (RADSEC_UPSTREAM=true)"
+    fi
+    envsubst < "$src" > "$FR_OUT/$f"
     validate_rendered "$FR_OUT/$f" || exit 1
 done
 echo "[freeradius] rendered OK"
 
 echo "All configs rendered and validated"
+
+# ─── oob-console (ser2net) ────────────────────────────────────────────────
+# Only when the OOB toggle is on AND the operator has written ports.yaml.
+# Renders ser2net.yaml (mounted into the container) + slots.rules (udev
+# fragment installed by setup-oob.sh on the next update.sh run).
+if [[ "${DEPLOY_OOB_CONSOLE:-disabled}" == "enabled" ]]; then
+    if [[ -f "${EDGE_DIR}/oob-console/ports.yaml" ]]; then
+        python3 "${EDGE_DIR}/oob-console/render-ser2net.py" \
+            "${EDGE_DIR}/oob-console/ports.yaml" \
+            "${EDGE_DIR}/oob-console/ser2net.yaml" \
+            "${EDGE_DIR}/oob-console/slots.rules"
+        echo "[oob] rendered OK ($(grep -c '^connection:' "${EDGE_DIR}/oob-console/ser2net.yaml") slots)"
+    else
+        echo "[ERROR] DEPLOY_OOB_CONSOLE=enabled but oob-console/ports.yaml missing" >&2
+        exit 1
+    fi
+fi

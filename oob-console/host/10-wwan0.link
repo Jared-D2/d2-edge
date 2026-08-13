@@ -1,0 +1,7 @@
+# Pins the SIM7600 RNDIS network interface to the name wwan0.
+# Matched by USB vendor ID so the name survives re-enumeration.
+[Match]
+Property=ID_VENDOR_ID=1e0e
+
+[Link]
+Name=wwan0

@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily RadSec cert expiry check
+[Timer]
+OnCalendar=*-*-* 08:15:00
+RandomizedDelaySec=900
+Persistent=true
+[Install]
+WantedBy=timers.target

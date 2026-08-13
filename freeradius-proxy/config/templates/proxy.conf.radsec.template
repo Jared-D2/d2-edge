@@ -1,0 +1,51 @@
+proxy server {
+    default_fallback = yes
+}
+
+home_server radius_home_auth {
+    type = auth
+    ipaddr = ${RADIUS_HOME_SERVER}
+    port = 2083
+    proto = tcp
+    secret = radsec
+    require_message_authenticator = yes
+    tls {
+        private_key_file = /opt/etc/raddb/certs/radsec/radsec.key
+        certificate_file = /opt/etc/raddb/certs/radsec/radsec.crt
+        ca_file          = /opt/etc/raddb/certs/radsec/ca-bundle.pem
+        tls_min_version  = "1.2"
+        tls_max_version  = "1.3"
+    }
+    response_window = 20
+    zombie_period = 40
+    revive_interval = 120
+    status_check = none
+}
+
+home_server radius_home_acct {
+    type = acct
+    ipaddr = ${RADIUS_HOME_SERVER}
+    port = 1813
+    secret = ${RADIUS_SHARED_SECRET}
+    require_message_authenticator = yes
+    response_window = 20
+    zombie_period = 40
+    revive_interval = 120
+    status_check = none
+}
+
+home_server_pool radius_auth_pool {
+    type = fail-over
+    home_server = radius_home_auth
+}
+
+home_server_pool radius_acct_pool {
+    type = fail-over
+    home_server = radius_home_acct
+}
+
+realm DEFAULT {
+    auth_pool = radius_auth_pool
+    acct_pool = radius_acct_pool
+    nostrip
+}

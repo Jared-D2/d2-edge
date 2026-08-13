@@ -1,0 +1,18 @@
+[Unit]
+Description=D2 SIM7600 power-on pulse (only if modem not enumerated)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/d2-oob
+# OOB_PWRKEY_GPIO default 6 (Waveshare SIM7600X HAT(B)); override in
+# /etc/default/d2-oob if the fitted HAT revision differs.
+ExecStart=/bin/sh -c '\
+  sleep 30; \
+  [ -e /dev/d2-modem ] && exit 0; \
+  gpio="${OOB_PWRKEY_GPIO:-6}"; \
+  echo "d2-oob: no modem after 30s, pulsing PWRKEY on GPIO $gpio" ; \
+  pinctrl set "$gpio" op dh; sleep 3; pinctrl set "$gpio" dl'
+
+[Install]
+WantedBy=multi-user.target

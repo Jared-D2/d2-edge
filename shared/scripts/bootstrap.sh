@@ -40,8 +40,50 @@ echo "  Hostname: ${OLD_HOSTNAME} -> ${NEW_HOSTNAME} (also in /etc/hosts)"
 
 # ─── System update ────────────────────────────────────────────────────────
 echo ""
+# apt-get update can exit 0 with an empty/corrupt package index (truncated
+# Packages files in /var/lib/apt/lists from an interrupted run, masked by an
+# InRelease "Hit"). A zero exit code is NOT proof the index is usable, so we
+# canary on a package that must exist (git, in Debian main) and self-heal by
+# rebuilding the lists before giving up.
+#
+# Resolvability is read from git's version-table REPOSITORY line
+# (e.g. "  500 http://deb.debian.org/debian trixie/main arm64 Packages"),
+# never the "Candidate: <ver>" line. Matching "Candidate: [0-9]" false-negates
+# on a perfectly healthy index because of: version epochs (git is "1:2.x"),
+# non-English locales (apt translates the word "Candidate"), and git already
+# being installed (Candidate is then served from /var/lib/dpkg/status, not a
+# repo). A "<priority> http(s)://" line only appears when a repo actually
+# offers the package, so it is the true positive-resolvability signal.
+apt_git_resolvable() {
+    apt-cache policy git 2>/dev/null | grep -qE '[0-9]+[[:space:]]+https?://'
+}
+
+apt_update_verified() {
+    apt-get update
+    apt_git_resolvable && return 0
+    echo "  apt index empty after update (git unresolvable) - rebuilding lists..." >&2
+    rm -rf /var/lib/apt/lists/*
+    apt-get update
+    if apt_git_resolvable; then
+        echo "  Recovered: apt index rebuilt." >&2
+        return 0
+    fi
+    echo "ERROR: apt cannot resolve packages even after rebuilding the index." >&2
+    echo "  arch: $(dpkg --print-architecture)" >&2
+    echo "  --- apt sources ---" >&2
+    # Handle both deb822 (.sources: URIs/Suites/Components) and legacy one-line
+    # (.list / sources.list: "deb http://...") formats; a Pi using only the
+    # legacy format would otherwise print an empty source list here.
+    grep -rhsE "^(deb |deb-src |Types:|URIs:|Suites:|Components:)" \
+        /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null >&2
+    echo "  --- apt-cache stats ---" >&2
+    apt-cache stats 2>/dev/null | head -3 >&2
+    echo "  Likely: clock skew (date), DNS, or 'main' missing from sources above." >&2
+    exit 1
+}
+
 echo "[2/8] Updating system packages + removing desktop bloat..."
-apt-get update -qq
+apt_update_verified
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
 # Remove desktop browsers — not needed on a headless edge appliance.
 # Keeps the SD card lean and shrinks the attack surface.
@@ -52,7 +94,7 @@ echo "  OK"
 # ─── Install dependencies ─────────────────────────────────────────────────
 echo ""
 echo "[3/8] Installing dependencies..."
-apt-get install -y -qq     curl git nano chrony logrotate ca-certificates     gnupg lsb-release apt-transport-https     ufw fail2ban unattended-upgrades     snmp lldpd
+apt-get install -y     curl git nano chrony logrotate ca-certificates     gnupg lsb-release apt-transport-https     ufw fail2ban unattended-upgrades     snmp lldpd
 echo "  OK"
 
 # ─── Install Docker ───────────────────────────────────────────────────────
@@ -187,22 +229,13 @@ if [[ -x "${EDGE_DIR}/scripts/setup-oxidized-proxy-user.sh" ]]; then
 fi
 
 
-# ─── Log rotation ─────────────────────────────────────────────────────────
-cat > /etc/logrotate.d/d2-edge-syslog << 'LOGROTATE'
-/opt/d2-edge/syslog-proxy/logs/*/*/*.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 0640 root root
-    sharedscripts
-    postrotate
-        docker kill --signal="SIGHUP" syslog-proxy 2>/dev/null || true
-    endscript
-}
-LOGROTATE
+# ─── Log rotation + local-log retention ───────────────────────────────────
+# Installed from shared/files via a shared script so update.sh can heal both
+# files on Pis already in the field (see the [3/6] host-heal block there).
+# The inline heredoc this replaced globbed logs/*/*/*.log — one path
+# component short of where syslog-ng actually writes — so it matched nothing
+# and never rotated anything.
+bash "${EDGE_DIR}/scripts/install-syslog-retention.sh"
 
 # ─── Create required directories ──────────────────────────────────────────
 mkdir -p "${EDGE_DIR}"/{syslog-proxy/{config,logs,state},zabbix-proxy/{config,data,logs},freeradius-proxy/config/{templates,rendered},auvik/{config,etc,logs},d2-agent,shared/scripts}

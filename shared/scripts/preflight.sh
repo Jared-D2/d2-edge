@@ -79,6 +79,10 @@ if [[ -f "$ENV_FILE" ]]; then
         [DEPLOY_SYSLOG_PROXY]=enabled
         [DEPLOY_ZABBIX_AGENT2]=enabled
         [DEPLOY_ZABBIX_PROXY]=enabled
+        # OOB console heals to DISABLED, unlike the toggles above — it is
+        # opt-in per Pi (4G HAT hardware required). Healing the key in
+        # keeps update.sh's absent-key handling unambiguous.
+        [DEPLOY_OOB_CONSOLE]=disabled
     )
     # DOCKER_GID default is host-derived, not a fleet-wide literal.
     host_docker_gid=$(getent group docker 2>/dev/null | cut -d: -f3 || true)
@@ -116,7 +120,6 @@ required=(
     RADIUS_SHARED_SECRET LOCAL_CLIENT_SECRET LOCAL_CLIENT_SUBNET
     AUVIK_USERNAME AUVIK_API_KEY AUVIK_DOMAIN_PREFIX
     AGENT_TOKEN CONTROLLER_URL SENSOR_MODE
-    RADSEC_CLIENT_SECRET
     DOCKER_GID
 )
 
@@ -141,6 +144,29 @@ if [[ -f "$ENV_FILE" ]]; then
             fail "required .env key '$k' is missing, empty, or still REPLACE_ME"
         fi
     done
+fi
+
+# --- 3.5. OOB console: conditional requirements + hardware gating -------
+# Only when the operator has switched the OOB stack on. Both directions:
+# enabled-without-HAT aborts (flag on wrong Pi / HAT not seated);
+# HAT-without-enabled is a non-fatal notice (freshly fitted, not yet on).
+if [[ -f "$ENV_FILE" ]]; then
+    oob_flag=$(grep -E '^DEPLOY_OOB_CONSOLE=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]')
+    hat_present=false
+    for _v in /sys/bus/usb/devices/*/idVendor; do
+        [[ -f "$_v" && "$(cat "$_v" 2>/dev/null)" == "1e0e" ]] && hat_present=true && break
+    done
+    if [[ "${oob_flag:-disabled}" == "enabled" ]]; then
+        for k in OOB_APN TS_OOB_AUTHKEY; do
+            v=$(grep -E "^${k}=" "$ENV_FILE" | tail -1 | cut -d= -f2-)
+            [[ -n "$v" && "$v" != "REPLACE_ME" ]] || fail "DEPLOY_OOB_CONSOLE=enabled but $k is empty"
+        done
+        [[ -f "$COMPOSE_DIR/oob-console/ports.yaml" ]] \
+            || fail "DEPLOY_OOB_CONSOLE=enabled but oob-console/ports.yaml missing"
+        $hat_present || fail "DEPLOY_OOB_CONSOLE=enabled but no SIM7600 (USB vendor 1e0e) found — wrong Pi, or HAT not seated"
+    elif $hat_present; then
+        echo "  preflight: NOTE 4G HAT detected but DEPLOY_OOB_CONSOLE is not 'enabled'" >&2
+    fi
 fi
 
 # --- 4. TS_AUTHKEY must be OAuth-client format --------------------------

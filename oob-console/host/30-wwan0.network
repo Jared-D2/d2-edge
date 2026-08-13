@@ -1,0 +1,16 @@
+# wwan0 (SIM7600 RNDIS): DHCP from the modem's internal NAT/DHCP.
+# ALL routes land in table 200 — never the main table. The ip rule
+# steering the OOB bridge subnet into table 200 and the fail-closed
+# blackhole are installed by oob-routing.service, unconditionally —
+# so with the modem absent, OOB traffic dies at the blackhole instead
+# of leaking out eth0.
+[Match]
+Name=wwan0
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=no
+
+[DHCPv4]
+RouteTable=200
+UseDNS=no

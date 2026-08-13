@@ -254,6 +254,75 @@ async def test_run_step_internet_ping_two_targets(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_step_internet_ping_tcp_fallback_when_icmp_blocked(monkeypatch):
+    """Both ICMP targets fail but TCP/443 connects → pass with icmp_blocked flag."""
+    def fake_ping(target, count=10, size=0, df=False, interval=1.0):
+        return {"success": False, "target": target, "packet_loss_pct": 100.0}
+    monkeypatch.setattr(app, "run_ping", fake_ping)
+    monkeypatch.setattr(app, "run_tcp_internet_check", lambda: {
+        "success": True,
+        "probes": {"1.1.1.1:443": {"success": True, "connect_ms": 12.0}}})
+
+    step = {"step_order": 80, "layer": "connectivity",
+            "command": "internet_ping", "depends_on": [50]}
+    result = await app._run_step(step, expected_ssid=None)
+    assert result["status"] == "passed"
+    assert result["result_summary"]["icmp_blocked"] is True
+    assert result["result_summary"]["tcp_fallback"]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_step_internet_ping_fails_when_icmp_and_tcp_fail(monkeypatch):
+    """Genuine outage: ICMP and TCP both fail → step fails."""
+    def fake_ping(target, count=10, size=0, df=False, interval=1.0):
+        return {"success": False, "target": target, "packet_loss_pct": 100.0}
+    monkeypatch.setattr(app, "run_ping", fake_ping)
+    monkeypatch.setattr(app, "run_tcp_internet_check",
+                        lambda: {"success": False, "probes": {}})
+
+    step = {"step_order": 80, "layer": "connectivity",
+            "command": "internet_ping", "depends_on": [50]}
+    result = await app._run_step(step, expected_ssid=None)
+    assert result["status"] == "failed"
+    assert "unreachable" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_step_internet_ping_no_tcp_fallback_when_icmp_passes(monkeypatch):
+    """TCP fallback must not run when ICMP already proves internet."""
+    def fake_ping(target, count=10, size=0, df=False, interval=1.0):
+        return {"success": True, "target": target, "packet_loss_pct": 0.0}
+    monkeypatch.setattr(app, "run_ping", fake_ping)
+    def boom():
+        raise AssertionError("tcp fallback must not be called")
+    monkeypatch.setattr(app, "run_tcp_internet_check", boom)
+
+    step = {"step_order": 80, "layer": "connectivity",
+            "command": "internet_ping", "depends_on": [50]}
+    result = await app._run_step(step, expected_ssid=None)
+    assert result["status"] == "passed"
+    assert "icmp_blocked" not in result["result_summary"]
+
+
+def test_run_tcp_internet_check_shape(monkeypatch):
+    """One target connects, one refuses: success overall, per-probe detail."""
+    class FakeConn:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+    def fake_create_connection(addr, timeout=None):
+        if addr[0] == "1.1.1.1":
+            return FakeConn()
+        raise OSError("connection refused")
+    monkeypatch.setattr(app.socket, "create_connection", fake_create_connection)
+    out = app.run_tcp_internet_check()
+    assert out["success"] is True
+    assert out["probes"]["1.1.1.1:443"]["success"] is True
+    assert out["probes"]["8.8.8.8:53"]["success"] is False
+
+
+@pytest.mark.asyncio
 async def test_run_step_app_http_uses_step_args(monkeypatch):
     """App-profile http step calls run_http_test with the profile-supplied url."""
     captured = {}

@@ -72,3 +72,25 @@ log {
     destination(d_local);
     flags(flow-control);
 };
+
+# --- OOB console session transcripts → Graylog ---------------------------
+# ser2net trace-both files, mounted ro from oob-console/logs. Directory
+# exists (empty) on every Pi; wildcard-file is a cheap no-op where OOB is
+# disabled. program-override becomes fields.orig_program via the shared
+# metadata rewrite, so Graylog can stream-match program:oob-console.
+source s_oob_console {
+    wildcard-file(
+        base-dir("/var/log/oob-console")
+        filename-pattern("*.log")
+        recursive(no)
+        flags(no-parse)
+        program-override("oob-console")
+    );
+};
+
+log {
+    source(s_oob_console);
+    rewrite(r_add_metadata);
+    destination(d_graylog);
+    flags(flow-control);
+};

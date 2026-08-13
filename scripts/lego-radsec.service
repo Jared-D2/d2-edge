@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily Pi RadSec cert renewal check (lego)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lego-radsec-renew.sh

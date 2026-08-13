@@ -953,8 +953,16 @@ async def _run_step(step: dict, expected_ssid: str | None) -> dict:
             losses = [r.get("packet_loss_pct", 100.0) for r in (r1, r2)]
             result_summary = {"cloudflare": r1, "google": r2, "loss_pct_min": min(losses)}
             either_passed = bool(r1.get("success") or r2.get("success"))
+            if not either_passed:
+                # Both ICMP probes down: distinguish "internet is down" from
+                # "site firewall blocks outbound ICMP" before failing.
+                tcp = await loop.run_in_executor(None, run_tcp_internet_check)
+                result_summary["tcp_fallback"] = tcp
+                if tcp.get("success"):
+                    result_summary["icmp_blocked"] = True
+                    either_passed = True
             status = "passed" if either_passed else "failed"
-            error = None if either_passed else "both internet targets unreachable"
+            error = None if either_passed else "both internet targets unreachable (icmp+tcp)"
         elif cmd == "http":
             url = args.get("url", "")
             if not url:
@@ -1368,6 +1376,29 @@ def run_ping(target: str, count: int = 10, size: int = 0, df: bool = False, inte
     return result
 
 
+def run_tcp_internet_check(timeout: float = 3.0) -> dict:
+    """TCP-connect probes to well-known anycast endpoints (443/53).
+
+    Fallback for internet_ping at sites whose firewalls block outbound ICMP:
+    both pings fail every cycle while the internet is actually fine
+    (stack-review P1-7, 2026-07-02 — ncm001/wer001 false-incident flood).
+    """
+    probes = {}
+    ok = False
+    for host, port in (("1.1.1.1", 443), ("8.8.8.8", 53)):
+        t0 = time.time()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                probes[f"{host}:{port}"] = {
+                    "success": True,
+                    "connect_ms": round((time.time() - t0) * 1000.0, 1),
+                }
+            ok = True
+        except OSError as e:
+            probes[f"{host}:{port}"] = {"success": False, "error": str(e)[:100]}
+    return {"success": ok, "probes": probes}
+
+
 def run_mtu_test(target: str, max_size: int = 1500) -> dict:
     """Binary-search the largest IPv4 MTU that reaches target with DF set.
 
@@ -1719,8 +1750,13 @@ def _looks_like_ip_literal(host: str) -> bool:
         return False
 
 
-def _resolve_and_check(host: str) -> tuple[bool, list]:
-    """Resolve host to every IP; return (blocked?, [ips]).
+def _resolve_and_check(host: str) -> tuple[bool, list, str]:
+    """Resolve host to every IP; return (blocked?, [ips], reason).
+
+    reason is "" when not blocked, "blocked" for a genuine security block
+    (metadata / loopback / link-local target) and "unresolvable" when
+    getaddrinfo itself failed -- callers can retry the latter (a flaky
+    local resolver) but must never retry the former.
 
     Customer LAN (RFC1918) is intentionally permitted because probing
     customer infra is this agent's purpose. We only block:
@@ -1728,13 +1764,14 @@ def _resolve_and_check(host: str) -> tuple[bool, list]:
       - loopback / link-local / multicast / reserved / unspecified
     """
     if not host:
-        return True, []
+        return True, [], "blocked"
     if host.lower() in METADATA_HOSTS:
-        return True, []
+        return True, [], "blocked"
     # If host is already an IP literal, skip DNS.
     try:
         ipaddress.ip_address(host)
-        return _ip_is_blocked(host), [host]
+        blocked = _ip_is_blocked(host)
+        return blocked, [host], "blocked" if blocked else ""
     except ValueError:
         pass
     # Hostname — resolve every A/AAAA record and check each.
@@ -1757,7 +1794,7 @@ def _resolve_and_check(host: str) -> tuple[bool, list]:
             # If the sentinel passes, the gaierror is name-specific and we
             # block defensively as before.
             _check_thread_spawn()  # raises SpawnFailureError on exhaustion
-        return True, []  # unresolvable — block defensively
+        return True, [], "unresolvable"  # block defensively, but retryable
     def _ip_sort_key(ip_str):
         try:
             return (ipaddress.ip_address(ip_str).version == 6, ip_str)
@@ -1766,12 +1803,31 @@ def _resolve_and_check(host: str) -> tuple[bool, list]:
     ips = sorted({info[4][0] for info in infos}, key=_ip_sort_key)
     for ip in ips:
         if _ip_is_blocked(ip):
-            return True, ips
-    return False, ips
+            return True, ips, "blocked"
+    return False, ips, ""
 
 
-def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) -> dict:
-    """HTTP/HTTPS response time test using curl timing metrics."""
+def run_http_test(url: str, follow_redirects: bool = False, timeout: int = 15,
+                  retries: int = 2, retry_delay: float = 1.0) -> dict:
+    """HTTP/HTTPS response time test using curl timing metrics.
+
+    follow_redirects defaults to False so availability probes score the
+    *intended* endpoint's own response: e.g. https://login.microsoftonline.com
+    answers 302 (redirect to www.office.com) and that 302 means M365 auth is up.
+    Following the redirect made a transient blip on the redirect *target*
+    (office.com) read as "M365 down" (false positive, 2026-07-14). Callers that
+    need the full redirect chain (diagnostic http step, on-demand http_test)
+    pass follow_redirects=True explicitly.
+
+    On a transport failure (curl non-zero exit: connect refused/reset/timeout)
+    the probe retries up to `retries` times, waiting `retry_delay`s between
+    attempts, before recording success=0 -- so a sub-second network hiccup does
+    not open an incident. HTTP error codes (4xx/5xx) return ok=True and are NOT
+    retried; they already count as a reachable endpoint (success = http_code > 0).
+    Transient getaddrinfo failures get the same retry budget and record a
+    distinct "DNS resolution failed" error so the controller can attribute
+    the fault to the sensor's local resolver instead of the target app.
+    """
     # Pre-flight: if the host is in thread-spawn exhaustion, both
     # _resolve_and_check (Python getaddrinfo) and curl-internal getaddrinfo
     # will fail in different ways. Raise SpawnFailureError up front so the
@@ -1795,10 +1851,23 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
         port = parsed.port or scheme_port
     except Exception:
         return {"url": url, "success": False, "error": "Invalid URL"}
-    blocked, ips = _resolve_and_check(host)
+    blocked, ips, block_reason = _resolve_and_check(host)
+    # A transient local-resolver failure (flaky gateway forwarder, cold
+    # AAAA lookup timing out -- 2026-07-24 jh-pi) gets the same retry
+    # budget as curl transport failures below. Genuine security blocks
+    # (metadata / loopback / link-local) are never retried.
+    if blocked and block_reason == "unresolvable":
+        for _attempt in range(retries):
+            time.sleep(retry_delay)
+            blocked, ips, block_reason = _resolve_and_check(host)
+            if not (blocked and block_reason == "unresolvable"):
+                break
     if blocked:
+        if block_reason == "unresolvable":
+            return {"url": url, "success": False,
+                    "error": "DNS resolution failed (local resolver)"}
         return {"url": url, "success": False,
-                "error": "Host blocked (metadata / loopback / link-local / unresolvable)"}
+                "error": "Host blocked (metadata / loopback / link-local)"}
     # Use seconds-based variables (compatible with all curl versions), convert to ms
     fmt = (
         "dns_s=%{time_namelookup}\n"
@@ -1820,7 +1889,16 @@ def run_http_test(url: str, follow_redirects: bool = True, timeout: int = 15) ->
     if follow_redirects and not _looks_like_ip_literal(host):
         cmd.append("-L")
     cmd.append(url)
-    ok, raw = run_cmd(cmd, timeout=timeout + 5)
+    # Retry transport failures (curl non-zero exit) a few times before recording
+    # a failed sample, so a transient connect blip does not open an incident.
+    # run_cmd raises SpawnFailureError on thread starvation -- that propagates
+    # (no retry), matching prior behaviour. HTTP error codes give ok=True.
+    attempts = max(1, retries + 1)
+    for _attempt in range(attempts):
+        ok, raw = run_cmd(cmd, timeout=timeout + 5)
+        if ok or _attempt == attempts - 1:
+            break
+        time.sleep(retry_delay)
     result = {"url": url, "success": ok, "timestamp": time.time()}
     if ok:
         parsed = {}
@@ -1857,7 +1935,7 @@ def run_tcp_time(host: str, port: int = 443, timeout: int = 5) -> dict:
     swap the target mid-syscall.
     """
     result = {"host": host, "port": port, "timestamp": time.time()}
-    blocked, ips = _resolve_and_check(host)
+    blocked, ips, _reason = _resolve_and_check(host)
     if blocked or not ips:
         result["success"] = False
         result["connect_ms"] = None
@@ -1909,7 +1987,7 @@ def run_port_check(host: str, port: str = "443", scan_type: str = "tcp",
     # Validate port spec unless top_ports takes precedence.
     if top_ports == 0:
         validate_port_spec(str(port))
-    blocked, ips = _resolve_and_check(host)
+    blocked, ips, _reason = _resolve_and_check(host)
     if blocked or not ips:
         return {"host": host, "port": port, "scan_type": scan_type,
                 "reachable": False, "error": "Target resolves to a blocked IP"}

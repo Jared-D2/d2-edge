@@ -1,0 +1,81 @@
+---
+# Issue a RadSec cert on an enrolled edge Pi + set up its Zabbix monitoring.
+# Run from the control node (.3) as svc_ansible. Fits the least-priv model: the
+# ONLY privileged step is `sudo -n /usr/local/sbin/lego-radsec-enroll.sh` (granted
+# in scripts/setup-svc-ansible.sh). No broad become; .3 never touches the CA.
+#
+# PREREQUISITE -- the GATED step, done OFF .3: the Pi's DNS-01 key must already be
+# registered with acme-hook. The play prints the exact command; a CA admin runs
+# `ansible/register-radsec-pi.sh '<pubkey>'` on ca-dns. A Pi must not be able to
+# authorize itself to the CA, so this is deliberately not automatable from .3.
+#
+# Usage: ansible-playbook -i inventory/netbox.yml ansible/enroll-radsec-pi.yml \
+#          -l <pi> -e zabbix_api_token=<dedicated-token>
+- name: Issue RadSec cert + monitoring on enrolled Pi(s)
+  hosts: "{{ target | default('radsec_pending') }}"
+  become: false
+  gather_facts: false
+  vars:
+    zabbix_api_url: "https://10.255.255.4/api_jsonrpc.php"
+  tasks:
+    - name: Read the Pi DNS-01 pubkey + CERT_NAME (no privilege; /etc/lego is 0755)
+      ansible.builtin.slurp: { src: "{{ item }}" }
+      loop: [ /etc/lego/ssh_id.pub, /etc/lego/radsec.env ]
+      register: reads
+    - ansible.builtin.set_fact:
+        pi_pubkey: "{{ reads.results[0].content | b64decode | trim }}"
+        cert_name: "{{ (reads.results[1].content | b64decode).split('=')[1] | trim }}"
+
+    - name: "GATED step (run on ca-dns as CA admin if not done yet)"
+      ansible.builtin.debug:
+        msg: "sudo /usr/local/sbin/register-radsec-pi.sh '{{ pi_pubkey }}'"
+
+    - name: First issuance (idempotent; skips if cert exists; needs the Pi registered)
+      ansible.builtin.command: sudo -n /usr/local/sbin/lego-radsec-enroll.sh
+      register: enroll
+      changed_when: "enroll.rc == 0 and 'nothing to do' not in (enroll.stdout | default(''))"
+      failed_when: enroll.rc != 0
+
+    - name: Zabbix hostid lookup
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        validate_certs: false
+        headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
+        body_format: json
+        body: { jsonrpc: "2.0", method: host.get, params: { output: [hostid], filter: { host: ["{{ inventory_hostname }}"] } }, id: 1 }
+      register: zbx_host
+      when: zabbix_api_token is defined
+    - name: Zabbix trapper item (ignore if exists)
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        validate_certs: false
+        headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: item.create
+          params: { name: "RadSec cert days to expiry", key_: "radsec.cert.daysleft", hostid: "{{ zbx_host.json.result[0].hostid }}", type: 2, value_type: 0, units: days }
+          id: 2
+      failed_when: false
+      when: zabbix_api_token is defined and zbx_host.json.result | length > 0
+    - name: Zabbix triggers warn<=10>5 + high<=5 (ignore if exist)
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        validate_certs: false
+        headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: trigger.create
+          params:
+            - { description: "RadSec cert expiring on {HOST.NAME} (<=10d, renewal overdue)", expression: "last(/{{ inventory_hostname }}/radsec.cert.daysleft)<=10 and last(/{{ inventory_hostname }}/radsec.cert.daysleft)>5", priority: 2, manual_close: 1 }
+            - { description: "RadSec cert CRITICALLY expiring on {HOST.NAME} (<=5d)", expression: "last(/{{ inventory_hostname }}/radsec.cert.daysleft)<=5", priority: 4, manual_close: 1 }
+          id: 3
+      failed_when: false
+      when: zabbix_api_token is defined and zbx_host.json.result | length > 0
