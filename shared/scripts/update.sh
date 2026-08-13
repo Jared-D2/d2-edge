@@ -185,6 +185,14 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-lego-radsec.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-lego-radsec.sh"
 fi
+# OOB console host layer (4G HAT): idempotent install of udev/networkd/
+# routing/watchdog + modem mode pin. STRICTLY gated — only runs when the
+# operator has enabled OOB on this Pi; every other Pi is untouched.
+# Unlike the fail-soft heals above this one is fail-LOUD (no || true):
+# a half-installed OOB layer must abort the deploy, not limp.
+if grep -qE '^DEPLOY_OOB_CONSOLE=enabled' "$EDGE_DIR/.env" 2>/dev/null; then
+    bash "$EDGE_DIR/oob-console/host/setup-oob.sh"
+fi
 echo "  OK"
 
 echo
@@ -225,6 +233,19 @@ for entry in auvik:DEPLOY_AUVIK d2-agent:DEPLOY_D2_AGENT \
         DISABLED+=("${entry%%:*}")
     fi
 done
+# OOB pair: deploy_flag defaults ABSENT keys to 'enabled' (correct for the
+# original eight, wrong for a disabled-by-default service). preflight heals
+# the key into every .env, but guard the absent-key window explicitly: no
+# key means OFF. Both containers move together with the one toggle.
+oob_flag=$(deploy_flag DEPLOY_OOB_CONSOLE)
+if ! grep -qE '^DEPLOY_OOB_CONSOLE=' "$EDGE_DIR/.env" 2>/dev/null; then
+    oob_flag=disabled
+fi
+if [[ "$oob_flag" == "enabled" ]]; then
+    RECREATE+=(oob-tailscale oob-console)
+else
+    DISABLED+=(oob-tailscale oob-console)
+fi
 echo
 echo "Services enabled:  ${RECREATE[*]}"
 if (( ${#DISABLED[@]} )); then
@@ -240,6 +261,10 @@ if [[ " ${RECREATE[*]} " == *" d2-agent "* ]]; then
     echo "  OK"
 else
     echo "  skipped (DEPLOY_D2_AGENT is not 'enabled')"
+fi
+if [[ " ${RECREATE[*]} " == *" oob-console "* ]]; then
+    docker compose build oob-console
+    echo "  OK (oob-console)"
 fi
 
 echo
