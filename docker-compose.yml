@@ -346,6 +346,10 @@ services:
     depends_on:
       oob-tailscale:
         condition: service_healthy
+        # restart oob-console whenever oob-tailscale recreates — it lives
+        # in that container's netns; a solo oob-tailscale restart otherwise
+        # leaves ser2net serving a dead namespace (pilot-caught).
+        restart: true
     device_cgroup_rules:
       - "c 188:* rwm"
       - "c 166:* rwm"

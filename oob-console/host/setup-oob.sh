@@ -91,6 +91,21 @@ if [[ -e /dev/d2-modem ]]; then
     fi
 fi
 
+# 5.5. APN: ensure PDP profile 1 matches OOB_APN from .env (pilot: empty
+#      profile = no IPv4 session; Telstra-wholesale SIMs need it explicit).
+#      Type "IP" not IPV4V6 — v6-primary grants no v4 on these SIMs.
+install -m 0755 "$HOSTD/oob-at.py" /usr/local/sbin/oob-at.py
+OOB_APN=$(grep -E '^OOB_APN=' "$EDGE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]')
+if [[ -n "$OOB_APN" && -e /dev/d2-modem ]]; then
+    if ! /usr/local/sbin/oob-at.py 'AT+CGDCONT?' 2>/dev/null | grep -q "\"$OOB_APN\""; then
+        echo "[oob] setting APN on PDP profile 1: $OOB_APN (modem will reset)"
+        /usr/local/sbin/oob-at.py "AT+CGDCONT=1,\"IP\",\"$OOB_APN\"" >/dev/null 2>&1 || true
+        /usr/local/sbin/oob-at.py 'AT+CFUN=1,1' >/dev/null 2>&1 || true
+        sleep 20
+        udevadm settle --timeout=10 || true
+    fi
+fi
+
 # 6. Verify block — degrades gracefully when no SIM is fitted yet.
 fail=0
 say() { echo "[oob][verify] $*"; }
