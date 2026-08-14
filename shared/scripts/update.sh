@@ -70,6 +70,15 @@ chown -R admin:admin "$EDGE_DIR/.git" 2>/dev/null || true
 # (a stray rm) — the pull two lines down will restore them. Without this,
 # xargs' non-zero exit trips `set -euo pipefail` and aborts before pull.
 sudo -u admin git ls-files -z | xargs -0r -I{} chown admin:admin "$EDGE_DIR/{}" 2>/dev/null || true
+# Parent DIRECTORIES of tracked files too — git unlink/recreate during
+# checkout needs write on the containing dir. Root-owned syslog-proxy/config
+# blocked the OOB-merge pull on both the pilot and nw-pi01 (2026-08-14).
+# NOTE self-mod lag: this heal only protects pulls run by an update.sh that
+# already contains it — a fleet Pi's FIRST failing pull needs the manual
+# recovery (chown dirs → git reset --hard origin/main); the Ansible rollout
+# play should pre-chown tracked dirs before the first post-OOB update wave.
+sudo -u admin git ls-files | xargs -rn1 dirname | sort -u \
+    | while read -r d; do chown admin:admin "$EDGE_DIR/$d" 2>/dev/null || true; done
 sudo -u admin git pull
 # Stamp current commit into .env so d2-agent reports the running version.
 SHA=$(sudo -u admin git -C "$EDGE_DIR" rev-parse HEAD)
