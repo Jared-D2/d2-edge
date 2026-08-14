@@ -70,6 +70,15 @@ chown -R admin:admin "$EDGE_DIR/.git" 2>/dev/null || true
 # (a stray rm) — the pull two lines down will restore them. Without this,
 # xargs' non-zero exit trips `set -euo pipefail` and aborts before pull.
 sudo -u admin git ls-files -z | xargs -0r -I{} chown admin:admin "$EDGE_DIR/{}" 2>/dev/null || true
+# Parent DIRECTORIES of tracked files too — git unlink/recreate during
+# checkout needs write on the containing dir. Root-owned syslog-proxy/config
+# blocked the OOB-merge pull on both the pilot and nw-pi01 (2026-08-14).
+# NOTE self-mod lag: this heal only protects pulls run by an update.sh that
+# already contains it — a fleet Pi's FIRST failing pull needs the manual
+# recovery (chown dirs → git reset --hard origin/main); the Ansible rollout
+# play should pre-chown tracked dirs before the first post-OOB update wave.
+sudo -u admin git ls-files | xargs -rn1 dirname | sort -u \
+    | while read -r d; do chown admin:admin "$EDGE_DIR/$d" 2>/dev/null || true; done
 sudo -u admin git pull
 # Stamp current commit into .env so d2-agent reports the running version.
 SHA=$(sudo -u admin git -C "$EDGE_DIR" rev-parse HEAD)
@@ -104,6 +113,14 @@ if [[ -f "$EDGE_DIR/.env" ]] && grep -Eq '^TS_AUTHKEY=tskey-client-[A-Za-z0-9-]+
     sed -i -E 's|^(TS_AUTHKEY=tskey-client-[A-Za-z0-9-]+)$|\1?ephemeral=false|' "$EDGE_DIR/.env"
     echo "  migrated TS_AUTHKEY: appended ?ephemeral=false (durable node registration)"
 fi
+# Same durability fix for the OOB console's separate tailnet identity —
+# an ephemeral <pi>-oob node would be DELETED by the control plane during
+# a long 4G outage and 404-wedge on recovery: the exact dark-OOB-link
+# scenario the console exists to prevent.
+if [[ -f "$EDGE_DIR/.env" ]] && grep -Eq '^TS_OOB_AUTHKEY=tskey-client-[A-Za-z0-9-]+$' "$EDGE_DIR/.env"; then
+    sed -i -E 's|^(TS_OOB_AUTHKEY=tskey-client-[A-Za-z0-9-]+)$|\1?ephemeral=false|' "$EDGE_DIR/.env"
+    echo "  migrated TS_OOB_AUTHKEY: appended ?ephemeral=false (durable OOB node)"
+fi
 
 echo
 echo "[2/6] Validating .env and host state..."
@@ -122,6 +139,21 @@ if [[ -f "$DROPIN_SRC" ]]; then
     if [[ ! -f "$DROPIN_DST" ]] || ! cmp -s "$DROPIN_SRC" "$DROPIN_DST"; then
         install -m 0644 -o root -g root "$DROPIN_SRC" "$DROPIN_DST"
         echo "  installed/updated $DROPIN_DST"
+    fi
+fi
+# NetworkManager guard for Docker plumbing: stop NM ever activating a
+# wired profile on veth/docker bridges (proven hazard class — NM hijacked
+# a wired profile onto a modem interface on the OOB pilot and took eth0
+# down). Fleet-wide, not OOB-gated; OOB Pis layer a superset in
+# 90-d2-oob.conf which sorts later and wins the unmanaged-devices key.
+NM_GUARD_SRC="$EDGE_DIR/shared/files/85-d2-docker-nm.conf"
+NM_GUARD_DST=/etc/NetworkManager/conf.d/85-d2-docker-nm.conf
+if command -v nmcli >/dev/null 2>&1 && [[ -f "$NM_GUARD_SRC" ]]; then
+    if [[ ! -f "$NM_GUARD_DST" ]] || ! cmp -s "$NM_GUARD_SRC" "$NM_GUARD_DST"; then
+        mkdir -p /etc/NetworkManager/conf.d
+        install -m 0644 -o root -g root "$NM_GUARD_SRC" "$NM_GUARD_DST"
+        systemctl try-restart NetworkManager 2>/dev/null || true
+        echo "  installed/updated $NM_GUARD_DST (NM docker-iface guard)"
     fi
 fi
 # Oxidized bastion user: idempotent. Migrates legacy oxidized-proxy →
