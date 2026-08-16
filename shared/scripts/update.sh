@@ -317,10 +317,7 @@ if [[ " ${RECREATE[*]} " == *" d2-agent "* ]]; then
 else
     echo "  skipped (DEPLOY_D2_AGENT is not 'enabled')"
 fi
-if [[ " ${RECREATE[*]} " == *" oob-console "* ]]; then
-    docker compose build oob-console
-    echo "  OK (oob-console)"
-fi
+# oob-console is a prebuilt ghcr image now — no on-Pi build step.
 
 echo
 echo "[6/6] Recreating containers..."

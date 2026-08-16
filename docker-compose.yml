@@ -340,8 +340,10 @@ services:
   # targets visible. cgroup rules grant char majors 188 (ttyUSB) and
   # 166 (ttyACM); hotplugged adapters appear without a recreate.
   oob-console:
-    build: ./oob-console
-    image: d2-edge-oob-console
+    # Prebuilt on ghcr — no on-Pi WAN build during deploys (review item).
+    # Rebuild/push procedure: docker build oob-console/ on any arm64 Pi,
+    # tag ghcr.io/jared-d2/oob-console:trixie-<date>, push, re-pin digest.
+    image: ghcr.io/jared-d2/oob-console:trixie-20260814@sha256:dc3346c41bbf49ac243c01a152921bab121e162933095f9bb8218cc7213ac886
     container_name: oob-console
     profiles: ["${DEPLOY_OOB_CONSOLE:-disabled}"]
     restart: unless-stopped
