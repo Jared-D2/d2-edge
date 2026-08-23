@@ -245,7 +245,12 @@ fi
 #    answers AT again well within that window.
 if (( ! at_ok )); then
     setc at_fails "$(( $(count at_fails) + 1 ))"
-    (( $(count at_fails) < 2 )) && exit 0   # tolerate a single blip
+    # Tolerate a single blip — except in the first 10 min after boot: the
+    # first probe runs at 3 min, long past the modem's own boot, and a dead
+    # AT port there is the cold-boot wedge (pilot: 2 of 2 boots on 08-23).
+    # Acting on probe 1 cuts OOB dark time after a power-on from ~8 to ~3.5 min.
+    uptime_s=$(cut -d. -f1 /proc/uptime)
+    (( $(count at_fails) < 2 && uptime_s > 600 )) && exit 0
     setc at_fails 0
     if [[ -e /dev/d2-modem ]]; then
         log "modem on USB but AT unresponsive"

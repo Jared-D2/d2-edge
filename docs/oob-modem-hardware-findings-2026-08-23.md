@@ -21,12 +21,12 @@ counts.
 | | |
 |---|---|
 | Pi | Raspberry Pi 5 Model B Rev 1.1, 4 GB, Debian trixie, kernel 6.18.39, official 5 A PSU (`usb_max_current_enable=1`) |
-| HAT | Waveshare "SIM7600X 4G HAT" (classic), data cable in the socket marked **USB** → Pi USB-2 port (bus 3, port 2, 480 M); `bMaxPower` 500 mA, `bcdDevice` 3.18 |
+| HAT | Waveshare "SIM7600X 4G HAT" (classic), **seated on the 40-pin header** (5 V from the Pi's rail — confirmed by Jared 08-23 17:40), data cable in the socket marked **USB** → Pi USB-2 port (bus 3, port 2, 480 M); `bMaxPower` 500 mA, `bcdDevice` 3.18 |
 | Modem | SIMCOM SIM7600G-H, IMEI 862636058442946, `ATI` revision `SIM7600G_V2.0.2`, `AT+CGMR` `LE20B04SIM7600G22`, `AT+CSUB` `B04V03 / MDM9x07_LE20_G-H_22_V1.16_221104` (Nov 2022 build) |
 | USB mode | PID `9011` RNDIS composite (NVRAM-pinned): if0/1 rndis, if2 diag, if3 NMEA, **if4 AT** (`/dev/d2-modem`), if5 AT (slot 2 self-test), if6 audio/other |
 | SIM / carrier | ALDI (Telstra wholesale), APN `mdata.net.au`, LTE band 7, CSQ 20–21, `+CPSI` RSRP ≈ −108 dBm |
 | Modem self-reports when alive | `AT+CBC` 3.838 V (VBAT rail, nominal 3.4–4.2), `AT+CPMUTEMP` 32–36 °C |
-| PWRKEY | GPIO 6 pulse (the HAT(B) default) has **never had any visible effect** on this unit — the HAT is either not on the 40-pin header, or this revision maps PWRKEY elsewhere |
+| PWRKEY | GPIO 6 pulse (the HAT(B) default) has **never had any visible effect** on this unit although the HAT is on the header — this revision maps PWRKEY elsewhere, or its auto-power jumper masks it; the watchdog's "modem absent → PWRKEY" branch is inert on this unit |
 
 ## The failure phenotype
 
@@ -81,31 +81,55 @@ isn't hung — the modem's **USB function layer** is what comes up stuck.
 | Thermal | modem 32–36 °C, Pi 52 °C |
 | Cellular side | when alive: registered, CSQ 20–21, data flows; the wedge is pre-registration (no AT at all) |
 
-## Hypotheses, most likely first
+## Hypotheses, most likely first (re-ranked 17:40 after Jared confirmed the HAT is on the header)
 
-1. **Modem supply / power path on the HAT.** Symptoms fit a module whose
-   USB PHY stays up while the rest of the chip fails to complete boot or
-   browns out under the first TX burst (registration ≈ 20–40 s after boot,
-   peak SIM7600 draw up to ~2 A). The two "died while running" events were
-   3–5 min after a boot — plausibly the first registration/TAU TX. `AT+CBC`
-   3.84 V when alive is fine, but we can't see the rail *during* the failure.
-   Key unknown: **how is the HAT powered?** If it's not seated on the 40-pin
-   header and only draws VBUS through the micro-USB data cable from a Pi
-   USB-2 port, that's a ~1.2 A budget shared with the FTDI adapter — marginal
-   for this module. The fact that GPIO 6 PWRKEY has never done anything
-   points the same way (HAT not on the header, or a different revision).
-2. **Firmware boot bug (LE20B04SIM7600G22, Nov-2022 build).** "AT port dead
-   after boot until USB re-plug" is a known SIM7600 community complaint;
-   SIMCom has newer LE20 builds. Would explain the intermittency without
-   power involvement.
-3. **Micro-USB cable / socket.** No USB errors in dmesg, so less likely, but
-   a marginal cable can pass enumeration and fail bulk traffic.
+1. **Modem USB function stack wedges during its own boot — firmware
+   (LE20B04SIM7600G22, Nov-2022 build), possibly raced by the host binding
+   drivers the instant it enumerates.** The host always talks to the modem
+   immediately (RNDIS init, 5 × option opens, networkd DHCP) while the
+   modem's application side is still booting. "AT port dead after boot until
+   USB re-plug" is a known SIM7600 community complaint; SIMCom has newer LE20
+   builds. Experiment F (below) tests the race half: let the modem boot
+   75 s with the device left *unconfigured*, then configure it.
+2. **HAT-side 3.8 V regulator / decoupling under the first TX burst.** The
+   header 5 V rail itself is fine (5 A PSU, 5.11 V, no throttling), but the
+   two "died while running" events came 3–5 min after a boot — plausibly the
+   first registration/TAU TX (peak SIM7600 draw ≈ 2 A through the HAT's own
+   buck). `AT+CBC` 3.84 V when alive is fine; we can't see the rail during
+   the failure.
+3. **Micro-USB cable / socket.** No USB errors in dmesg, so least likely,
+   but a marginal cable can pass enumeration and fail bulk traffic.
+
+## Experiment F (17:46–17:56) — does it wedge if the Pi never talks to it?
+
+Five `AT+CFUN=1,1` reboots, alternating: **D** = bus `authorized_default=0`
+so the modem re-enumerates *unconfigured* and sits untouched for 75 s
+(descriptor reads only, no drivers, no DHCP), then `authorized=1`;
+**C** = normal immediate binding.
+
+| D1 | D2 | D3 | C1 | C2 |
+|---|---|---|---|---|
+| **wedged** — SET_CONFIGURATION → EPROTO after 75 s untouched | OK, AT 5 s after authorize | OK | OK, AT +5 s | OK, AT +10 s |
+
+- **The wedge occurs with zero host interaction** → modem-internal
+  (firmware/hardware), not a boot-time host race. There is no host-side way
+  to prevent it, only to detect and reset — which the watchdog does.
+- The rate swings wildly: 5/6 bad between 13:00 and 17:00, 1/5 bad at 17:50.
+  That pattern suits temperature / RF / registration state / firmware luck
+  more than a fixed wiring fault.
+
+Photo review (Jared, 17:45): HAT on the stacking header, cable in the
+socket marked **USB**, MAIN pigtail fitted, AUX/GNSS empty, PWR + NET LEDs
+lit, module label SIM7600G-H P/N S2-1097D-Z31E3 — nothing visibly wrong.
+The **PWR jumper** (bottom-left block, next to "Flight") looks open; on this
+HAT GPIO 6 only reaches PWRKEY when it is fitted, which explains why GPIO 6
+pulses have never done anything. Fit it only deliberately: it makes the
+watchdog's "modem absent → PWRKEY" branch real, and PWRKEY is also the one
+thing that can power the modem OFF.
 
 ## What would settle it (bench, ~30 min)
 
-1. **Check how the HAT is powered and seated.** If it's USB-VBUS-only, seat it
-   on the header (or feed the HAT's 5 V pins from the Pi's 5 V) and re-run
-   the reboot test below. This is the single most informative check.
+1. ~~Check how the HAT is powered and seated.~~ Done — on the header.
 2. **Reboot test:** with the watchdog timer stopped
    (`sudo systemctl stop oob-watchdog.timer`), run
    `sudo /usr/local/sbin/oob-at.py 'AT+CFUN=1,1'` five times, waiting 2 min
@@ -122,10 +146,11 @@ isn't hung — the modem's **USB function layer** is what comes up stuck.
 
 ## Already in place (so this is a maintenance item, not an outage)
 
-- `oob-watchdog` heals every observed variant: AT dead ×2 probes → port
-  reset → (if needed) driver rebind → oob pair restart; data-path failure
-  tries the port reset *before* `CFUN` because `CFUN` itself wedges this
-  unit. Worst case OOB is dark ~10–15 min after a wedge.
+- `oob-watchdog` heals every observed variant: AT dead ×2 probes (×1 in the
+  first 10 min after boot) → port reset → (if needed) driver rebind → oob
+  pair restart; data-path failure tries the port reset *before* `CFUN`
+  because `CFUN` itself wedges this unit. Worst case OOB is dark ~10–15 min
+  after a running wedge, ~3.5 min after a wedged cold boot.
 - Counters `oob.status[usb_recoveries]` / `[usb_recovery_failures]` on the
   Zabbix host; trigger **"OOB modem needed USB recovery 3+ times in 24h"**
   (Warning) is the signal that the hardware item is still open, and **"OOB
