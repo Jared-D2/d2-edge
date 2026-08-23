@@ -10,8 +10,11 @@
 # carrier/SIM condition, not a modem wedge, and gets no intervention.
 #
 # Heal ladder: absent from USB → PWRKEY power-on pulse (1/h max)
-#              on USB, AT dead  → USB re-authorize reset
-#              registered, no data ×3 → AT+CFUN=1,1 ×2 → USB re-authorize
+#              on USB, AT dead ×2 → USB recovery ladder (usb_recover)
+#              registered, no data ×3 → AT+CFUN=1,1 ×2 → USB recovery ladder
+#
+# Manual use: `oob-watchdog.sh --usb-recover [--skip-reauth]` runs the same
+# USB recovery ladder on demand (operator break-glass; see runbook).
 set -u
 STATE_DIR=/run/d2-oob; mkdir -p "$STATE_DIR"
 AT=/usr/local/sbin/oob-at.py
@@ -28,15 +31,83 @@ modem_usb_dirs() {
     done
 }
 
-usb_reset() {
-    local d
-    log "USB re-authorize reset of modem"
-    for d in $(modem_usb_dirs); do
-        echo 0 > "$d/authorized" 2>/dev/null
-        sleep 2
-        echo 1 > "$d/authorized" 2>/dev/null
+# ─── USB recovery ladder ─────────────────────────────────────────────────
+# Pilot incident 2026-08-23 (d2-lab-pi01, cold power-on): the modem
+# enumerated on USB but its function side was dead — no AT reply, RNDIS
+# carrier up with no DHCP. The old heal (re-authorize toggle alone) made it
+# WORSE: SET_CONFIGURATION(0) succeeded, SET_CONFIGURATION(1) failed with
+# EPROTO (-71) on the hung modem, and the device sat UNCONFIGURED
+# (bConfigurationValue empty, no ttyUSB*, no wwan0) — nothing left for the
+# kernel to rebind, OOB dark until a manual port reset + driver rebind.
+# Ladder now (each step pilot-verified to return ttyUSB*/wwan0 in ~2 s on a
+# healthy modem):
+#   1. re-authorize toggle — cheap, recovers driver-side wedges.
+#   2. if ports are not back within 15 s: USBDEVFS_RESET port reset (what a
+#      replug does at the protocol level — un-wedges the control pipe; the
+#      kernel re-applies the config and rebinds drivers if the device was
+#      still configured).
+#   3. if ports are still not back within 10 s (device left unconfigured —
+#      a port reset on an unconfigured device rebinds nothing): driver
+#      unbind/bind of the modem's USB device path (e.g. "3-2") re-issues
+#      SET_CONFIGURATION(1). Wait up to 30 s.
+# The modem stays powered throughout; PWRKEY is never touched here.
+modem_ports_back() { [[ -e /dev/d2-modem ]] && ip link show wwan0 >/dev/null 2>&1; }
+wait_ports() {  # wait_ports <seconds>
+    local deadline=$(( SECONDS + $1 ))
+    until modem_ports_back; do
+        (( SECONDS >= deadline )) && return 1
+        sleep 1
     done
 }
+usb_port_reset() {  # usb_port_reset <sysfs device dir>
+    local node
+    node=$(printf '/dev/bus/usb/%03d/%03d' "$(cat "$1/busnum")" "$(cat "$1/devnum")") || return 1
+    python3 - "$node" <<'PY'
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_WRONLY)
+try:
+    fcntl.ioctl(fd, 0x5514)   # USBDEVFS_RESET = _IO('U', 20)
+finally:
+    os.close(fd)
+PY
+}
+usb_recover() {  # usb_recover [--skip-reauth]
+    local d id cfg
+    for d in $(modem_usb_dirs); do
+        id=$(basename "$d")
+        if [[ "${1:-}" != "--skip-reauth" ]]; then
+            log "USB recovery of modem $id: step 1 re-authorize toggle"
+            echo 0 > "$d/authorized" 2>/dev/null
+            sleep 2
+            echo 1 > "$d/authorized" 2>/dev/null
+            if wait_ports 15; then log "modem $id recovered after re-authorize"; continue; fi
+        fi
+        cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
+        log "USB recovery of modem $id: step 2 port reset (cfg=[$cfg])"
+        usb_port_reset "$d" 2>/dev/null || log "modem $id: USBDEVFS_RESET ioctl failed — continuing"
+        if wait_ports 10; then log "modem $id recovered after port reset"; continue; fi
+        cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
+        log "USB recovery of modem $id: step 3 driver unbind/bind (cfg=[$cfg])"
+        echo "$id" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null
+        sleep 3
+        echo "$id" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
+        if wait_ports 30; then
+            log "modem $id recovered after port reset + driver rebind"
+        else
+            cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
+            log "modem $id STILL dead after port reset + driver rebind (cfg=[$cfg]) — needs a power cycle (Pi 5V feeds the HAT)"
+        fi
+    done
+}
+
+if [[ "${1:-}" == "--usb-recover" ]]; then
+    (( EUID == 0 )) || { echo "oob-watchdog: --usb-recover must run as root" >&2; exit 1; }
+    [[ -n "$(modem_usb_dirs)" ]] || { echo "oob-watchdog: no SIM7600 (vendor 1e0e) on the USB bus" >&2; exit 1; }
+    log "manual USB recovery requested${2:+ ($2)}"
+    usb_recover "${2:-}"
+    modem_ports_back && echo "modem ports back: $(readlink -f /dev/d2-modem), wwan0 present" || { echo "modem ports NOT back — see journalctl -t oob-watchdog" >&2; exit 1; }
+    exit 0
+fi
 
 # ─── Probe ────────────────────────────────────────────────────────────────
 modem_present=0; at_ok=0; registered=0; csq=-1; ping_ok=0; tailnet_online=0
@@ -103,13 +174,18 @@ if (( ! modem_present )); then
     exit 0
 fi
 
-# 2. on USB but AT dead: USB-level reset (never PWRKEY)
+# 2. on USB but AT dead (no reply, or /dev/d2-modem gone while the device is
+#    still on the bus): USB recovery ladder (never PWRKEY)
 if (( ! at_ok )); then
     setc at_fails "$(( $(count at_fails) + 1 ))"
     (( $(count at_fails) < 2 )) && exit 0   # tolerate a single blip
     setc at_fails 0
-    log "modem on USB but AT unresponsive"
-    usb_reset
+    if [[ -e /dev/d2-modem ]]; then
+        log "modem on USB but AT unresponsive"
+    else
+        log "modem on USB but /dev/d2-modem missing (unconfigured or ttys gone)"
+    fi
+    usb_recover
     exit 0
 fi
 setc at_fails 0
@@ -120,7 +196,7 @@ if (( ! registered )); then
     exit 0
 fi
 
-# 4. registered but no data path: CFUN ×2, then USB reset
+# 4. registered but no data path: CFUN ×2, then USB recovery ladder
 if (( ping_ok )); then
     setc ping_fails 0; setc cfun_resets 0
     exit 0
@@ -136,5 +212,5 @@ if (( $(count cfun_resets) < 2 )); then
     "$AT" 'AT+CFUN=1,1' >/dev/null 2>&1
 else
     setc cfun_resets 0
-    usb_reset
+    usb_recover
 fi

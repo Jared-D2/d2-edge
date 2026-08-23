@@ -86,6 +86,19 @@ else
     networkctl reload 2>/dev/null || true
 fi
 
+# 4.5. vnstat only accounts interfaces registered in its database; vnstatd
+#      did NOT auto-add wwan0 on the pilot (found 2026-08-23 — the watchdog's
+#      data budget read 0 MB forever). Register it once wwan0 exists.
+if ip link show wwan0 >/dev/null 2>&1 \
+   && ! vnstat --dbiflist 2>/dev/null | grep -qw wwan0; then
+    if vnstat --add -i wwan0 >/dev/null 2>&1; then
+        systemctl try-restart vnstat 2>/dev/null || true
+        echo "[oob] registered wwan0 with vnstat (OOB data budget accounting)"
+    else
+        echo "[oob] WARN: vnstat --add -i wwan0 failed — data budget will read 0"
+    fi
+fi
+
 # 5. Routing + power + watchdog + hotplug units.
 install -m 0755 "$HOSTD/oob-watchdog.sh" /usr/local/sbin/oob-watchdog.sh
 install -m 0755 "$HOSTD/oob-hotplug.sh"  /usr/local/sbin/oob-hotplug.sh
