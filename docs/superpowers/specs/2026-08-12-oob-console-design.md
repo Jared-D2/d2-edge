@@ -418,6 +418,24 @@ Findings, all pilot-verified on hardware:
    with the watchdog probe) as "APN wrong" and rebooted the modem with
    `AT+CFUN=1,1` on the deploy. It now acts only on a query that answered.
 
-Timings with the new ladder: dead-state simulation recovered on the 2nd
-probe in ~30 s, `-oob` back online ~15 s later; manual `--usb-recover`
-~25 s.
+8. **Reproduced the genuine dead state**: a port reset issued while the
+   modem was still in its post-`AT+CFUN=1,1` boot window (t+36 s, ttys
+   present, AT not yet answering) left it enumerated-but-dead — no AT, no
+   DHCP, `oob-tailscale` restart-looping — i.e. the cold-boot phenotype.
+   Best root-cause model for the incident: the Pi's USB bus reset at
+   kernel boot (~5 s after kernel start, ~20 s after power) lands inside
+   the SIM7600's firmware-boot window and can wedge its function side.
+   The watchdog's 2×5-min gate means it never resets a modem inside that
+   window itself; the ladder recovered the wedged modem 6 min later in
+   6 s (port reset → AT OK at +8 s → registered → `-oob` Online).
+9. AT also went dead twice more during the session minutes after a USB
+   bounce + `oob-console` restart with no USB event in dmesg (once ~3–5
+   min after a CFUN reboot). The ladder heals it within 10–15 min either
+   way; the underlying modem-side flakiness is OPEN (firmware
+   `SIM7600G_V2.0.2`; watch the Zabbix `oob.status[at_ok]` history for
+   recurrence and correlate with `journalctl -t oob-hotplug`).
+
+Timings with the final ladder: dead-state simulation recovered on the 2nd
+probe in ~10 s (reset + rebind), `-oob` back online ~5–15 s later; manual
+`--usb-recover` on a healthy modem ~15 s incl. pair restart; on the
+genuinely wedged modem 6 s.

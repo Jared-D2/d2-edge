@@ -64,6 +64,17 @@ wait_ports() {  # wait_ports <seconds>
         sleep 1
     done
 }
+# Ports back ≠ modem back: after a reset the SIM7600 answers AT a few
+# seconds later (up to ~20 s after re-enumeration on a full reboot). Each
+# probe costs 2.5 s; poll until OK or the deadline.
+wait_at() {  # wait_at <seconds>
+    local deadline=$(( SECONDS + $1 ))
+    while true; do
+        [[ -e /dev/d2-modem ]] && "$AT" AT 2>/dev/null | grep -q OK && return 0
+        (( SECONDS >= deadline )) && return 1
+        sleep 2
+    done
+}
 usb_port_reset() {  # usb_port_reset <sysfs device dir>
     local node
     node=$(printf '/dev/bus/usb/%03d/%03d' "$(cat "$1/busnum")" "$(cat "$1/devnum")") || return 1
@@ -92,19 +103,20 @@ usb_recover() {
         usb_port_reset "$d" 2>/dev/null || log "modem $id: USBDEVFS_RESET ioctl failed — continuing"
         sleep 2
         cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
-        if [[ -n "$cfg" ]] && wait_ports 8; then
-            log "modem $id recovered after port reset"
+        if [[ -n "$cfg" ]] && wait_ports 8 && wait_at 45; then
+            log "modem $id recovered after port reset (AT OK)"
             continue
         fi
-        log "USB recovery of modem $id: step 2 driver unbind/bind (cfg=[$cfg])"
+        cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
+        log "USB recovery of modem $id: step 2 driver unbind/bind (cfg=[$cfg], ports $(modem_ports_back && echo present || echo absent))"
         echo "$id" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null
         sleep 3
         echo "$id" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
-        if wait_ports 30; then
-            log "modem $id recovered after port reset + driver rebind"
+        if wait_ports 30 && wait_at 45; then
+            log "modem $id recovered after port reset + driver rebind (AT OK)"
         else
             cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
-            log "modem $id STILL dead after port reset + driver rebind (cfg=[$cfg]) — needs a power cycle (Pi 5V feeds the HAT)"
+            log "modem $id STILL dead after port reset + driver rebind (cfg=[$cfg], ports $(modem_ports_back && echo present || echo absent), AT $(wait_at 0 && echo OK || echo dead)) — will retry next cycle; if it persists, power-cycle (Pi 5V feeds the HAT)"
         fi
     done
     modem_ports_back && restart_oob_pair "after USB recovery"
@@ -115,8 +127,11 @@ if [[ "${1:-}" == "--usb-recover" ]]; then
     [[ -n "$(modem_usb_dirs)" ]] || { echo "oob-watchdog: no SIM7600 (vendor 1e0e) on the USB bus" >&2; exit 1; }
     log "manual USB recovery requested"
     usb_recover
-    modem_ports_back && echo "modem ports back: $(readlink -f /dev/d2-modem), wwan0 present" \
-        || { echo "modem ports NOT back — see journalctl -t oob-watchdog" >&2; exit 1; }
+    if modem_ports_back && wait_at 0; then
+        echo "modem back: $(readlink -f /dev/d2-modem) answers AT, wwan0 present"
+    else
+        echo "modem NOT back — see journalctl -t oob-watchdog" >&2; exit 1
+    fi
     exit 0
 fi
 
