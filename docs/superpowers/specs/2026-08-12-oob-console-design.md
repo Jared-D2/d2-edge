@@ -428,12 +428,22 @@ Findings, all pilot-verified on hardware:
    The watchdog's 2×5-min gate means it never resets a modem inside that
    window itself; the ladder recovered the wedged modem 6 min later in
    6 s (port reset → AT OK at +8 s → registered → `-oob` Online).
-9. AT also went dead twice more during the session minutes after a USB
-   bounce + `oob-console` restart with no USB event in dmesg (once ~3–5
-   min after a CFUN reboot). The ladder heals it within 10–15 min either
-   way; the underlying modem-side flakiness is OPEN (firmware
-   `SIM7600G_V2.0.2`; watch the Zabbix `oob.status[at_ok]` history for
-   recurrence and correlate with `journalctl -t oob-hotplug`).
+9. **The modem wedges itself on a large fraction of its own reboots.**
+   Controlled repeat (Experiment D, nothing touching USB, watchdog timer
+   stopped): `AT+CFUN=1,1` → re-enumerated at ~20 s → AT never answered
+   (>220 s), no DHCP — the identical phenotype, with no host-side reset at
+   all. Fifteen minutes earlier the same command came back fine at 41 s.
+   AT also died twice during the session minutes after a USB bounce with
+   no USB event in dmesg. So the cold-boot incident is most likely just
+   the modem's own boot failing (bus-reset timing may contribute but is
+   not required). Power side checked and clean: `throttled=0x0`, 5 A PSU,
+   EXT5V 5.11 V, zero USB over-current events, `bMaxPower` 500 mA. The
+   ladder heals every variant within 10–15 min; the modem-side flakiness
+   is OPEN (firmware `SIM7600G_V2.0.2`, HAT power path / seating worth a
+   look — GPIO PWRKEY pulses have never had any effect on this unit).
+   Watch Zabbix `oob.status[at_ok]` history for recurrence. Note heal
+   step 4 (`AT+CFUN=1,1` on "registered, no data") can therefore itself
+   produce a wedge — the USB ladder backstops it two probes later.
 
 Timings with the final ladder: dead-state simulation recovered on the 2nd
 probe in ~10 s (reset + rebind), `-oob` back online ~5–15 s later; manual
