@@ -12,6 +12,7 @@
 # Heal ladder: absent from USB → PWRKEY power-on pulse (1/h max)
 #              on USB, AT dead ×2 → USB recovery ladder (usb_recover)
 #              registered, no data ×3 → AT+CFUN=1,1 ×2 → USB recovery ladder
+#              data OK, -oob node offline ×2 → restart oob pair (1/30 min)
 #
 # Manual use: `oob-watchdog.sh --usb-recover [--skip-reauth]` runs the same
 # USB recovery ladder on demand (operator break-glass; see runbook).
@@ -98,6 +99,19 @@ usb_recover() {  # usb_recover [--skip-reauth]
             log "modem $id STILL dead after port reset + driver rebind (cfg=[$cfg]) — needs a power cycle (Pi 5V feeds the HAT)"
         fi
     done
+    # A recovered modem re-DHCPs wwan0 and the modem-side NAT state is gone;
+    # tailscaled in oob-tailscale then sits on a dead control connection
+    # indefinitely (pilot-verified 2026-08-23: new flows fine, node Offline
+    # for 15+ min, restart → Online in 5 s). Bounce the pair when ports are
+    # back; oob-console shares the netns so it must follow.
+    modem_ports_back && restart_oob_pair "after USB recovery"
+}
+restart_oob_pair() {  # restart_oob_pair <reason>
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx oob-tailscale || return 0
+    log "restarting oob-tailscale + oob-console ($1)"
+    docker restart oob-tailscale >/dev/null 2>&1 || true
+    docker restart oob-console >/dev/null 2>&1 || true
+    setc pair_restart_last "$(date +%s)"
 }
 
 if [[ "${1:-}" == "--usb-recover" ]]; then
@@ -199,6 +213,20 @@ fi
 # 4. registered but no data path: CFUN ×2, then USB recovery ladder
 if (( ping_ok )); then
     setc ping_fails 0; setc cfun_resets 0
+    # 5. data path fine but the -oob node is offline: tailscaled stuck on a
+    #    dead control connection (see restart_oob_pair). Two consecutive
+    #    probes, then bounce the pair, at most once per 30 min — a carrier
+    #    or Tailscale-side outage must not turn into a restart loop.
+    if (( ! tailnet_online )); then
+        setc tailnet_fails "$(( $(count tailnet_fails) + 1 ))"
+        if (( $(count tailnet_fails) >= 2 )) \
+           && (( $(date +%s) - $(count pair_restart_last) > 1800 )); then
+            setc tailnet_fails 0
+            restart_oob_pair "wwan0 data path OK but -oob node offline ×2"
+        fi
+    else
+        setc tailnet_fails 0
+    fi
     exit 0
 fi
 setc ping_fails "$(( $(count ping_fails) + 1 ))"
