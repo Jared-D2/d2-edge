@@ -2,7 +2,9 @@
 Description=Run D2 OOB 4G link watchdog every 5 minutes
 
 [Timer]
-OnBootSec=5min
+# First probe at 3 min (modem boot is <1 min; a modem that came up wedged at
+# cold boot — pilot 2026-08-23 — is then healed at the 2nd probe, ~8 min).
+OnBootSec=3min
 OnUnitActiveSec=5min
 
 [Install]

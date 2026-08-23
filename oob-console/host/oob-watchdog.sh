@@ -95,7 +95,7 @@ restart_oob_pair() {  # restart_oob_pair <reason>
     setc pair_restart_last "$(date +%s)"
 }
 usb_recover() {
-    local d id cfg
+    local d id cfg recovered=0
     for d in $(modem_usb_dirs); do
         id=$(basename "$d")
         cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
@@ -105,6 +105,7 @@ usb_recover() {
         cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
         if [[ -n "$cfg" ]] && wait_ports 8 && wait_at 45; then
             log "modem $id recovered after port reset (AT OK)"
+            recovered=1
             continue
         fi
         cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
@@ -114,20 +115,42 @@ usb_recover() {
         echo "$id" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
         if wait_ports 30 && wait_at 45; then
             log "modem $id recovered after port reset + driver rebind (AT OK)"
+            recovered=1
         else
             cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
             log "modem $id STILL dead after port reset + driver rebind (cfg=[$cfg], ports $(modem_ports_back && echo present || echo absent), AT $(wait_at 0 && echo OK || echo dead)) — will retry next cycle; if it persists, power-cycle (Pi 5V feeds the HAT)"
         fi
     done
-    modem_ports_back && restart_oob_pair "after USB recovery"
+    # Counters surface in /run/d2-oob/status → Zabbix oob.status[usb_recoveries]
+    # (a modem that needs this daily is a hardware ticket, not a watchdog job).
+    if (( recovered )); then
+        setc usb_recoveries "$(( $(count usb_recoveries) + 1 ))"
+        setc last_usb_recovery "$(date +%s)"
+        # Only bounce the pair on SUCCESS: on a permanently dead modem the
+        # ladder retries every 2 probes, and an unconditional restart would
+        # kill in-band `telnet localhost 300N` console sessions every 10 min.
+        restart_oob_pair "after USB recovery"
+    else
+        setc usb_recovery_failures "$(( $(count usb_recovery_failures) + 1 ))"
+    fi
+    return $(( ! recovered ))
 }
+
+# One run at a time: a timer run mid-ladder and a manual --usb-recover (or
+# a second `systemctl start`) must not reset the modem under each other.
+# A ladder run is ≤ ~2.5 min worst case; a caller that can't get the lock
+# inside 4 min walks away rather than piling on.
+exec 9>"$STATE_DIR/run.lock"
+if ! flock -w 240 9; then
+    log "another oob-watchdog run has held the lock for >240 s — skipping this run"
+    exit 0
+fi
 
 if [[ "${1:-}" == "--usb-recover" ]]; then
     (( EUID == 0 )) || { echo "oob-watchdog: --usb-recover must run as root" >&2; exit 1; }
     [[ -n "$(modem_usb_dirs)" ]] || { echo "oob-watchdog: no SIM7600 (vendor 1e0e) on the USB bus" >&2; exit 1; }
     log "manual USB recovery requested"
-    usb_recover
-    if modem_ports_back && wait_at 0; then
+    if usb_recover; then
         echo "modem back: $(readlink -f /dev/d2-modem) answers AT, wwan0 present"
     else
         echo "modem NOT back — see journalctl -t oob-watchdog" >&2; exit 1
@@ -182,6 +205,9 @@ tailnet_online=$tailnet_online
 data_used_mb=$data_used_mb
 data_cap_mb=$data_cap_mb
 data_used_pct=$data_used_pct
+usb_recoveries=$(count usb_recoveries)
+usb_recovery_failures=$(count usb_recovery_failures)
+last_usb_recovery=$(count last_usb_recovery)
 updated=$(date +%s)
 EOF
 mv "$STATE_DIR/status.new" "$STATE_DIR/status"
@@ -256,3 +282,5 @@ else
     setc cfun_resets 0
     usb_recover
 fi
+
+exit 0
