@@ -152,7 +152,14 @@ fi
 . "$EDGE_DIR/shared/scripts/lib/envfile.sh"
 OOB_APN=$(env_get OOB_APN "$EDGE_DIR/.env")
 if [[ -n "$OOB_APN" && -e /dev/d2-modem ]]; then
-    if ! /usr/local/sbin/oob-at.py 'AT+CGDCONT?' 2>/dev/null | grep -q "\"$OOB_APN\""; then
+    # Only act on a query that actually ANSWERED (+CGDCONT: lines present).
+    # An empty/garbled reply (AT port busy — e.g. the watchdog probing at
+    # the same instant, seen on the pilot 2026-08-23) must not be read as
+    # "APN wrong" → CGDCONT rewrite + AT+CFUN=1,1 modem reboot on a deploy.
+    cgdcont=$(/usr/local/sbin/oob-at.py 'AT+CGDCONT?' 2>/dev/null || true)
+    if ! grep -q '+CGDCONT:' <<<"$cgdcont"; then
+        echo "[oob] WARN: AT+CGDCONT? gave no answer — skipping APN check this run"
+    elif ! grep -q "\"$OOB_APN\"" <<<"$cgdcont"; then
         echo "[oob] setting APN on PDP profile 1: $OOB_APN (modem will reset)"
         /usr/local/sbin/oob-at.py "AT+CGDCONT=1,\"IP\",\"$OOB_APN\"" >/dev/null 2>&1 || true
         /usr/local/sbin/oob-at.py 'AT+CFUN=1,1' >/dev/null 2>&1 || true

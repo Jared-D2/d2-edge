@@ -14,8 +14,8 @@
 #              registered, no data ×3 → AT+CFUN=1,1 ×2 → USB recovery ladder
 #              data OK, -oob node offline ×2 → restart oob pair (1/30 min)
 #
-# Manual use: `oob-watchdog.sh --usb-recover [--skip-reauth]` runs the same
-# USB recovery ladder on demand (operator break-glass; see runbook).
+# Manual use: `oob-watchdog.sh --usb-recover` runs the same USB recovery
+# ladder on demand (operator break-glass; see runbook).
 set -u
 STATE_DIR=/run/d2-oob; mkdir -p "$STATE_DIR"
 AT=/usr/local/sbin/oob-at.py
@@ -35,22 +35,26 @@ modem_usb_dirs() {
 # ─── USB recovery ladder ─────────────────────────────────────────────────
 # Pilot incident 2026-08-23 (d2-lab-pi01, cold power-on): the modem
 # enumerated on USB but its function side was dead — no AT reply, RNDIS
-# carrier up with no DHCP. The old heal (re-authorize toggle alone) made it
-# WORSE: SET_CONFIGURATION(0) succeeded, SET_CONFIGURATION(1) failed with
-# EPROTO (-71) on the hung modem, and the device sat UNCONFIGURED
-# (bConfigurationValue empty, no ttyUSB*, no wwan0) — nothing left for the
-# kernel to rebind, OOB dark until a manual port reset + driver rebind.
-# Ladder now (each step pilot-verified to return ttyUSB*/wwan0 in ~2 s on a
-# healthy modem):
-#   1. re-authorize toggle — cheap, recovers driver-side wedges.
-#   2. if ports are not back within 15 s: USBDEVFS_RESET port reset (what a
-#      replug does at the protocol level — un-wedges the control pipe; the
-#      kernel re-applies the config and rebinds drivers if the device was
-#      still configured).
-#   3. if ports are still not back within 10 s (device left unconfigured —
-#      a port reset on an unconfigured device rebinds nothing): driver
-#      unbind/bind of the modem's USB device path (e.g. "3-2") re-issues
-#      SET_CONFIGURATION(1). Wait up to 30 s.
+# carrier up with no DHCP lease for 10+ min. The old heal (an `authorized`
+# 0→1 toggle) made it WORSE: SET_CONFIGURATION(0) succeeded but
+# SET_CONFIGURATION(1) got EPROTO (-71) from the hung modem, leaving the
+# device UNCONFIGURED (bConfigurationValue empty, no ttyUSB*, no wwan0)
+# with nothing for the kernel to rebind — OOB dark until a manual port
+# reset + driver rebind. The toggle was dropped: it only ever succeeds on
+# a modem that needs no recovery (pilot-verified: EPROTO on a modem whose
+# function side is down, a no-op on an unconfigured device).
+#
+# Ladder (each step pilot-verified 2026-08-23):
+#   1. USBDEVFS_RESET port reset — a replug at the protocol level; un-wedges
+#      the modem's control pipe. If the device was still configured the
+#      kernel re-applies the config and rebinds drivers itself (~2 s).
+#   2. If ttyUSB*/wwan0 are not back (device unconfigured — a port reset
+#      rebinds nothing on an unconfigured device): driver unbind/bind of
+#      the modem's USB device path ("3-2", derived from the 1e0e sysfs
+#      match) re-issues SET_CONFIGURATION(1). Wait up to 30 s.
+#   3. Ports back → bounce oob-tailscale + oob-console: tailscaled sits on
+#      a dead control connection after a modem bounce (new flows fine, node
+#      Offline 15+ min; restart → Online in 5 s).
 # The modem stays powered throughout; PWRKEY is never touched here.
 modem_ports_back() { [[ -e /dev/d2-modem ]] && ip link show wwan0 >/dev/null 2>&1; }
 wait_ports() {  # wait_ports <seconds>
@@ -72,23 +76,27 @@ finally:
     os.close(fd)
 PY
 }
-usb_recover() {  # usb_recover [--skip-reauth]
+restart_oob_pair() {  # restart_oob_pair <reason>
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx oob-tailscale || return 0
+    log "restarting oob-tailscale + oob-console ($1)"
+    docker restart oob-tailscale >/dev/null 2>&1 || true
+    docker restart oob-console >/dev/null 2>&1 || true
+    setc pair_restart_last "$(date +%s)"
+}
+usb_recover() {
     local d id cfg
     for d in $(modem_usb_dirs); do
         id=$(basename "$d")
-        if [[ "${1:-}" != "--skip-reauth" ]]; then
-            log "USB recovery of modem $id: step 1 re-authorize toggle"
-            echo 0 > "$d/authorized" 2>/dev/null
-            sleep 2
-            echo 1 > "$d/authorized" 2>/dev/null
-            if wait_ports 15; then log "modem $id recovered after re-authorize"; continue; fi
-        fi
         cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
-        log "USB recovery of modem $id: step 2 port reset (cfg=[$cfg])"
+        log "USB recovery of modem $id: step 1 port reset (cfg=[$cfg])"
         usb_port_reset "$d" 2>/dev/null || log "modem $id: USBDEVFS_RESET ioctl failed — continuing"
-        if wait_ports 10; then log "modem $id recovered after port reset"; continue; fi
+        sleep 2
         cfg=$(cat "$d/bConfigurationValue" 2>/dev/null)
-        log "USB recovery of modem $id: step 3 driver unbind/bind (cfg=[$cfg])"
+        if [[ -n "$cfg" ]] && wait_ports 8; then
+            log "modem $id recovered after port reset"
+            continue
+        fi
+        log "USB recovery of modem $id: step 2 driver unbind/bind (cfg=[$cfg])"
         echo "$id" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null
         sleep 3
         echo "$id" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
@@ -99,27 +107,16 @@ usb_recover() {  # usb_recover [--skip-reauth]
             log "modem $id STILL dead after port reset + driver rebind (cfg=[$cfg]) — needs a power cycle (Pi 5V feeds the HAT)"
         fi
     done
-    # A recovered modem re-DHCPs wwan0 and the modem-side NAT state is gone;
-    # tailscaled in oob-tailscale then sits on a dead control connection
-    # indefinitely (pilot-verified 2026-08-23: new flows fine, node Offline
-    # for 15+ min, restart → Online in 5 s). Bounce the pair when ports are
-    # back; oob-console shares the netns so it must follow.
     modem_ports_back && restart_oob_pair "after USB recovery"
-}
-restart_oob_pair() {  # restart_oob_pair <reason>
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx oob-tailscale || return 0
-    log "restarting oob-tailscale + oob-console ($1)"
-    docker restart oob-tailscale >/dev/null 2>&1 || true
-    docker restart oob-console >/dev/null 2>&1 || true
-    setc pair_restart_last "$(date +%s)"
 }
 
 if [[ "${1:-}" == "--usb-recover" ]]; then
     (( EUID == 0 )) || { echo "oob-watchdog: --usb-recover must run as root" >&2; exit 1; }
     [[ -n "$(modem_usb_dirs)" ]] || { echo "oob-watchdog: no SIM7600 (vendor 1e0e) on the USB bus" >&2; exit 1; }
-    log "manual USB recovery requested${2:+ ($2)}"
-    usb_recover "${2:-}"
-    modem_ports_back && echo "modem ports back: $(readlink -f /dev/d2-modem), wwan0 present" || { echo "modem ports NOT back — see journalctl -t oob-watchdog" >&2; exit 1; }
+    log "manual USB recovery requested"
+    usb_recover
+    modem_ports_back && echo "modem ports back: $(readlink -f /dev/d2-modem), wwan0 present" \
+        || { echo "modem ports NOT back — see journalctl -t oob-watchdog" >&2; exit 1; }
     exit 0
 fi
 
@@ -189,7 +186,9 @@ if (( ! modem_present )); then
 fi
 
 # 2. on USB but AT dead (no reply, or /dev/d2-modem gone while the device is
-#    still on the bus): USB recovery ladder (never PWRKEY)
+#    still on the bus): USB recovery ladder (never PWRKEY). Two consecutive
+#    probes (timer = 5 min apart) — a modem rebooting after AT+CFUN=1,1
+#    answers AT again well within that window.
 if (( ! at_ok )); then
     setc at_fails "$(( $(count at_fails) + 1 ))"
     (( $(count at_fails) < 2 )) && exit 0   # tolerate a single blip
