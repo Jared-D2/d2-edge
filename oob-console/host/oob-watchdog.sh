@@ -88,7 +88,9 @@ finally:
 PY
 }
 restart_oob_pair() {  # restart_oob_pair <reason>
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx oob-tailscale || return 0
+    # -a: a STOPPED pair (e.g. an interrupted `compose up`, incident 08-14)
+    # must be started, not skipped — `docker restart` starts a stopped one.
+    docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx oob-tailscale || return 0
     log "restarting oob-tailscale + oob-console ($1)"
     docker restart oob-tailscale >/dev/null 2>&1 || true
     docker restart oob-console >/dev/null 2>&1 || true
