@@ -62,6 +62,11 @@ at install time, not during someone's break-glass session.
 | Slot connects but no banner/output | Adapter present but cabled to nothing / wrong baud |
 | You get kicked mid-session | Someone else (or your own reconnect) took the slot — coordinate; check the transcript in Graylog for who |
 | `-oob` node not in tailnet | 4G path down: SSH the Pi in-band, `journalctl -t oob-watchdog`, `/usr/local/sbin/oob-at.py 'AT+CEREG?'` (want `0,1`/`0,5`), `vnstat -i wwan0` for data-cap exhaustion |
+| `-oob` node missing after a power-on; watchdog logs `modem on USB but AT unresponsive` → `USB recovery of modem 3-2` | Modem enumerated on USB but its function side never came up (no AT reply, wwan0 carrier but no DHCP — pilot cold-boot incident 2026-08-23). The watchdog self-heals within ~15 min: 2 probes 5 min apart, then port reset → driver unbind/bind → oob pair restart (~30 s). Manual, same ladder: `sudo /usr/local/sbin/oob-watchdog.sh --usb-recover` |
+| `lsusb` lists `1e0e:9011` but no `/dev/ttyUSB*`/`wwan0`; `/sys/bus/usb/devices/<id>/bConfigurationValue` empty; dmesg `can't set config #1, error -71` | Device left UNCONFIGURED by a failed SET_CONFIGURATION on a hung modem (the pre-08-23 `authorized` toggle did this). `--usb-recover` fixes it (port reset, then `echo <id> > /sys/bus/usb/drivers/usb/unbind` / `bind`). Last resort: pull the Pi's power — a `sudo reboot` does NOT power-cycle the HAT (fed from the Pi's 5 V pins) |
+| `-oob` node offline but `ping -I wwan0 1.1.1.1` works from the Pi | tailscaled in `oob-tailscale` stuck on a dead control connection after a modem bounce (new flows fine). Watchdog restarts the pair after 2 such probes (≤1 per 30 min); manual: `sudo docker restart oob-tailscale oob-console` (oob-console shares the netns and must follow) |
+| `AT` dead for ~20 s right after a deploy or `AT+CFUN=1,1` | Normal: the SIM7600 re-enumerates ~20 s after a soft reset and answers AT ~20 s after that. Not a fault; the watchdog tolerates a single failed probe |
+| Zabbix `oob.status[data_used_mb]` always 0 | vnstat wasn't accounting wwan0 (it never auto-added it on the pilot) — setup-oob registers it on deploy; check `vnstat --dbiflist` |
 | Everything dead, site up | `sudo bash shared/scripts/update.sh` re-heals the whole layer; verify block tells you what's broken |
 
 ## Per-Pi enablement (recap)

@@ -124,11 +124,25 @@ OOB uplink down.
 
 ### Modem self-heal
 
-`oob-watchdog.timer` (host): every 5 min, ping a known IP sourced from
-`wwan0`. After 3 consecutive failures: `AT+CFUN=1,1` (modem soft reset);
-if still dead after 2 cycles, GPIO PWRKEY power-cycle. LTE modules wedge
-silently ("registered, passing nothing") — without local self-heal, the first
-real outage likely finds the modem in a state a reboot would have fixed.
+`oob-watchdog.timer` (host): every 5 min, probe (AT, registration, CSQ,
+ping via `wwan0`, `-oob` tailnet liveness, data budget) → record
+`/run/d2-oob/status` → heal, non-destructively. LTE modules wedge
+silently ("registered, passing nothing", or — pilot 2026-08-23 —
+enumerated on USB with the function side dead) — without local self-heal
+the first real outage finds the modem in a state a replug would have
+fixed. Ladder (as built; the original CFUN → PWRKEY sketch was replaced by
+the 2026-08-13 hardening review + the 2026-08-23 incident):
+
+- absent from USB → PWRKEY power-ON pulse, ≤1/h (the only PWRKEY use — a
+  3 s hold on a running SIM7600 is power-OFF).
+- on USB, AT dead ×2 probes → **USB recovery ladder**: USBDEVFS_RESET port
+  reset → if ttyUSB/wwan0 not back (device unconfigured) driver
+  unbind/bind of the device path → restart `oob-tailscale` + `oob-console`
+  (tailscaled sits on a dead control connection after a modem bounce).
+  Manual: `oob-watchdog.sh --usb-recover`.
+- registered, no data ×3 → `AT+CFUN=1,1` ×2 → USB recovery ladder.
+- data OK, `-oob` node offline ×2 → restart the oob pair (≤1/30 min).
+- not registered → no action (carrier/SIM condition, not a modem wedge).
 
 ### Data budget controls
 
@@ -362,3 +376,48 @@ Operational facts (fleet-relevant):
   slot (connect → `AT` → `OK`) on every OOB Pi.
 - USB 3.0 ports are fine for console adapters; the "USB 2.0 for the
   modem" guidance is about the modem itself.
+
+### 14.1 Addendum 2026-08-23 — cold-boot dead modem (d2-lab-pi01)
+
+Incident: Pi powered on after ~6 days off. Modem enumerated at t=5 s
+(`1e0e:9011`, 5 option ttys + rndis, `/dev/d2-modem` → ttyUSB2 = interface
+04, correct) but its function side never came up: wwan0 had carrier and no
+DHCP lease, AT never answered, `oob-tailscale` crash-looped 42× (no route
+to control). The old watchdog heal — an `authorized` 0→1 toggle — made it
+worse at t=622 s: SET_CONFIGURATION(0) succeeded, SET_CONFIGURATION(1) got
+EPROTO (-71), and the device sat UNCONFIGURED (`bConfigurationValue`
+empty, no ttys, no wwan0) — OOB dark until a manual USBDEVFS_RESET + driver
+rebind at t=888 s (ports back, registered, `-oob` online). Root cause is
+inside the modem (firmware boot state — reproduced in miniature: after
+`AT+CFUN=1,1` the SIM7600 re-enumerates at ~20 s and answers AT only at
+~41 s; at cold boot the same state persisted indefinitely). Not a udev /
+probe-port problem: interface 04 is the AT port in RNDIS mode (05 also
+answers; 02/03/06 do not).
+
+Findings, all pilot-verified on hardware:
+
+1. The `authorized` toggle recovers nothing it is meant for: EPROTO on a
+   modem whose function side is down (strands it unconfigured), no-op on
+   an unconfigured device, ~2 s success only on a healthy modem. Dropped.
+2. USBDEVFS_RESET (port reset) un-wedges the control pipe; the kernel
+   re-applies the config and rebinds drivers itself if the device was
+   still configured (~2 s). On an unconfigured device a reset rebinds
+   nothing — hence "usbreset didn't help" in the incident.
+3. `echo 3-2 > /sys/bus/usb/drivers/usb/unbind` / `bind` re-issues
+   SET_CONFIGURATION(1): ports back in ~2 s on a healthy modem; on the hung
+   modem it worked only after the port reset. Ladder = reset → rebind.
+4. After any modem bounce, tailscaled in `oob-tailscale` sits on a dead
+   control connection indefinitely (new flows from the netns work; node
+   Offline 15+ min; `docker restart` → Online in 5 s). The watchdog now
+   restarts the pair after a recovery and on "data OK, node offline ×2".
+5. A `sudo reboot` does NOT power-cycle the HAT (Pi 5 keeps the header 5 V
+   up); only pulling the Pi's power does.
+6. vnstatd never auto-added wwan0 on the pilot — the data-budget item read
+   0 MB since install. setup-oob now registers it (`vnstat --add`).
+7. setup-oob's APN check treated an unanswered `AT+CGDCONT?` (AT port busy
+   with the watchdog probe) as "APN wrong" and rebooted the modem with
+   `AT+CFUN=1,1` on the deploy. It now acts only on a query that answered.
+
+Timings with the new ladder: dead-state simulation recovered on the 2nd
+probe in ~30 s, `-oob` back online ~15 s later; manual `--usb-recover`
+~25 s.
