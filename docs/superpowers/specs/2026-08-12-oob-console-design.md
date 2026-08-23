@@ -140,9 +140,16 @@ the 2026-08-13 hardening review + the 2026-08-23 incident):
   unbind/bind of the device path → restart `oob-tailscale` + `oob-console`
   (tailscaled sits on a dead control connection after a modem bounce).
   Manual: `oob-watchdog.sh --usb-recover`.
-- registered, no data ×3 → `AT+CFUN=1,1` ×2 → USB recovery ladder.
+- registered, no data ×3 → USB recovery ladder, then `AT+CFUN=1,1`
+  (alternating; the CFUN path waits for AT and bounces the pair).
 - data OK, `-oob` node offline ×2 → restart the oob pair (≤1/30 min).
 - not registered → no action (carrier/SIM condition, not a modem wedge).
+- Tolerance: every AT exchange takes `/run/lock/d2-modem.lock`
+  (`oob-at.py`), one watchdog run at a time (`/run/d2-oob/run.lock`),
+  recovery counters in `/run/d2-oob/status` → Zabbix
+  `oob.status[usb_recoveries|usb_recovery_failures]` with triggers
+  "needed USB recovery 3+ in 24h" (Warning) and "on USB but AT unresponsive
+  30 min" (Average). First probe 3 min after boot.
 
 ### Data budget controls
 
@@ -445,7 +452,24 @@ Findings, all pilot-verified on hardware:
    step 4 (`AT+CFUN=1,1` on "registered, no data") can therefore itself
    produce a wedge — the USB ladder backstops it two probes later.
 
+10. **Fault-injection pass (same day)** found and fixed: the
+    `tailnet_online` probe grepped `"Online": true` anywhere in
+    `tailscale status --json` — that matches every *peer*, so it never
+    read 0 while the daemon answered (`tailscale down` went unnoticed);
+    `restart_oob_pair` skipped a *stopped* pair (`docker ps` vs `ps -a`);
+    after the watchdog's own `AT+CFUN=1,1` tailscaled was left stuck
+    inside step 5's rate limit; concurrent `oob-at.py` callers stole each
+    other's replies; and `AT+CFUN=1,1` wedged the modem on 4 of 5 reboots,
+    so the data-path heal now tries the USB ladder first. Verified on the
+    pilot: 3 concurrent AT callers serialised; manual `--usb-recover`
+    serialised against a timer run; `tailscale down` → healed on probe 2;
+    both containers stopped → started on probe 2; ICMP blocked ×3 → ladder
+    → Online in 10 s; CFUN-wedged modem → ladder two probes later.
+    Not exercised (unsafe on the bench): the modem-absent PWRKEY branch —
+    a 3 s pulse on a running modem is power-off if GPIO 6 ever turns out
+    to be the real PWRKEY on some HAT revision.
+
 Timings with the final ladder: dead-state simulation recovered on the 2nd
 probe in ~10 s (reset + rebind), `-oob` back online ~5–15 s later; manual
 `--usb-recover` on a healthy modem ~15 s incl. pair restart; on the
-genuinely wedged modem 6 s.
+genuinely wedged modem 5–6 s.

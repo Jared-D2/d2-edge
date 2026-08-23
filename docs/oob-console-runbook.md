@@ -67,6 +67,9 @@ at install time, not during someone's break-glass session.
 | `-oob` node offline but `ping -I wwan0 1.1.1.1` works from the Pi | tailscaled in `oob-tailscale` stuck on a dead control connection after a modem bounce (new flows fine). Watchdog restarts the pair after 2 such probes (≤1 per 30 min); manual: `sudo docker restart oob-tailscale oob-console` (oob-console shares the netns and must follow) |
 | `AT` dead for ~20 s right after a deploy or `AT+CFUN=1,1` | Normal: the SIM7600 re-enumerates ~20 s after a soft reset and answers AT ~20 s after that. Not a fault; the watchdog tolerates a single failed probe |
 | Zabbix `oob.status[data_used_mb]` always 0 | vnstat wasn't accounting wwan0 (it never auto-added it on the pilot) — setup-oob registers it on deploy; check `vnstat --dbiflist` |
+| Zabbix "OOB modem needed USB recovery 3+ times in 24h" | OOB is working — the watchdog keeps healing a modem that comes up wedged (`oob.status[usb_recoveries]` counts since boot; `journalctl -t oob-watchdog` has each ladder run). Hardware/firmware ticket: HAT seating, power, SIM7600 firmware |
+| `oob-at.py` prints `modem AT port busy (lock held >15s)` | Another AT user is mid-exchange (watchdog probe, `setup-oob`, another operator) — all callers serialise on `/run/lock/d2-modem.lock`; retry in a few seconds |
+| `journalctl -t oob-watchdog` says `another oob-watchdog run has held the lock for >240 s` | A ladder run is stuck (>4 min) — `ps aux \| grep oob-watchdog`; kill the stale run, then `--usb-recover` |
 | Everything dead, site up | `sudo bash shared/scripts/update.sh` re-heals the whole layer; verify block tells you what's broken |
 
 ## Per-Pi enablement (recap)
