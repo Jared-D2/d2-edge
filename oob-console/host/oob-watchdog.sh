@@ -11,7 +11,8 @@
 #
 # Heal ladder: absent from USB → PWRKEY power-on pulse (1/h max)
 #              on USB, AT dead ×2 → USB recovery ladder (usb_recover)
-#              registered, no data ×3 → AT+CFUN=1,1 ×2 → USB recovery ladder
+#              registered, no data ×3 → USB recovery ladder, then AT+CFUN=1,1
+#                                        (alternating, + pair restart)
 #              data OK, -oob node offline ×2 → restart oob pair (1/30 min)
 #
 # Manual use: `oob-watchdog.sh --usb-recover` runs the same USB recovery
@@ -262,9 +263,10 @@ if (( ! registered )); then
     exit 0
 fi
 
-# 4. registered but no data path: CFUN ×2, then USB recovery ladder
+# 4. registered but no data path ×3: USB recovery ladder, then AT+CFUN=1,1,
+#    alternating
 if (( ping_ok )); then
-    setc ping_fails 0; setc cfun_resets 0
+    setc ping_fails 0; setc data_heals 0
     # 5. data path fine but the -oob node is offline: tailscaled stuck on a
     #    dead control connection (see restart_oob_pair). Two consecutive
     #    probes, then bounce the pair, at most once per 30 min — a carrier
@@ -286,9 +288,17 @@ log "registered but wwan0 ping failure $(count ping_fails)/3"
 (( $(count ping_fails) < 3 )) && exit 0
 setc ping_fails 0
 
-if (( $(count cfun_resets) < 2 )); then
-    setc cfun_resets "$(( $(count cfun_resets) + 1 ))"
-    log "soft-resetting modem (AT+CFUN=1,1), attempt $(count cfun_resets)/2"
+# Alternate: USB recovery ladder first (host-side port reset re-does RNDIS +
+# DHCP in ~5 s and has never wedged the modem outside its boot window), then
+# AT+CFUN=1,1 (modem-side reboot — re-attaches the PDP context, but on the
+# pilot SIM7600 it came back wedged on 4 of 5 reboots, costing the ladder
+# two more probes). data_heals resets to 0 whenever ping succeeds.
+n=$(count data_heals); setc data_heals "$(( n + 1 ))"
+if (( n % 2 == 0 )); then
+    log "data path heal $(( n + 1 )): USB recovery ladder"
+    usb_recover
+else
+    log "data path heal $(( n + 1 )): soft-resetting modem (AT+CFUN=1,1)"
     "$AT" 'AT+CFUN=1,1' >/dev/null 2>&1
     # The reboot re-enumerates USB and re-DHCPs wwan0; tailscaled then sits on
     # a dead control connection (fault test 2026-08-23) — wait for the modem
@@ -300,9 +310,6 @@ if (( $(count cfun_resets) < 2 )); then
     else
         log "modem not answering AT 140 s after AT+CFUN=1,1 — USB recovery ladder takes over if it stays dead"
     fi
-else
-    setc cfun_resets 0
-    usb_recover
 fi
 
 exit 0
