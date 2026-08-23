@@ -174,8 +174,18 @@ fi
 if (( registered )); then
     ping -I wwan0 -c 2 -W 5 1.1.1.1 >/dev/null 2>&1 && ping_ok=1
 fi
-docker exec oob-tailscale tailscale status --json 2>/dev/null \
-    | grep -q '"Online": *true' && tailnet_online=1
+# Self.Online only — the JSON also carries an "Online" flag per PEER, so a
+# bare grep read "online" whenever any other tailnet node was up (fault test
+# 2026-08-23: `tailscale down` inside the container went unnoticed).
+tailnet_online=$(docker exec oob-tailscale tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(1 if d.get("BackendState") == "Running" and d.get("Self", {}).get("Online") else 0)
+except Exception:
+    print(0)
+' 2>/dev/null || echo 0)
+[[ "$tailnet_online" == 1 ]] || tailnet_online=0
 
 # Data budget: vnstat month-to-date on wwan0 vs OOB_DATA_CAP_MB (.env,
 # default 1000). vnstat may have no month row yet on a fresh install.
@@ -280,6 +290,16 @@ if (( $(count cfun_resets) < 2 )); then
     setc cfun_resets "$(( $(count cfun_resets) + 1 ))"
     log "soft-resetting modem (AT+CFUN=1,1), attempt $(count cfun_resets)/2"
     "$AT" 'AT+CFUN=1,1' >/dev/null 2>&1
+    # The reboot re-enumerates USB and re-DHCPs wwan0; tailscaled then sits on
+    # a dead control connection (fault test 2026-08-23) — wait for the modem
+    # (re-enum ~20 s, AT ~40 s; this SIM7600 sometimes needs >90 s) and bounce
+    # the pair. A modem that stays dead is the USB ladder's job 2 probes later.
+    sleep 20
+    if wait_at 120; then
+        restart_oob_pair "after AT+CFUN=1,1 soft reset"
+    else
+        log "modem not answering AT 140 s after AT+CFUN=1,1 — USB recovery ladder takes over if it stays dead"
+    fi
 else
     setc cfun_resets 0
     usb_recover
