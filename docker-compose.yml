@@ -2,7 +2,7 @@ services:
 
   # ─── Tailscale sidecar ────────────────────────────────────────────────────
   tailscale:
-    image: tailscale/tailscale:v1.96.5@sha256:dbeff02d2337344b351afac203427218c4d0a06c43fc10a865184063498472a6
+    image: tailscale/tailscale:v1.102.3@sha256:8c42c4574ab066384fcb72f69e086a2ff1dd3652eb6f56856cee34bcf0d2f680
     container_name: tailscale
     hostname: ${EDGE_HOSTNAME}
     restart: unless-stopped
@@ -295,7 +295,7 @@ services:
   # 4G, and nothing else on the Pi can. Own node identity <hostname>-oob,
   # tag:oob, minted by the DEDICATED oob OAuth client (TS_OOB_AUTHKEY).
   oob-tailscale:
-    image: tailscale/tailscale:v1.96.5@sha256:dbeff02d2337344b351afac203427218c4d0a06c43fc10a865184063498472a6
+    image: tailscale/tailscale:v1.102.3@sha256:8c42c4574ab066384fcb72f69e086a2ff1dd3652eb6f56856cee34bcf0d2f680
     container_name: oob-tailscale
     profiles: ["${DEPLOY_OOB_CONSOLE:-disabled}"]
     hostname: ${EDGE_HOSTNAME}-oob
