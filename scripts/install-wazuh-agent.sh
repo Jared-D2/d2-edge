@@ -14,6 +14,15 @@
 # -- the shared group configs already tune Pi FIM + the docker-listener wodle.
 # Gated by DEPLOY_WAZUH in .env (default 'enabled'; absent key == enabled).
 # Mirrors the auvik-watchdog / svc_ansible self-arm heals in update.sh.
+#
+# 2026-08-23 "host profile" heal (runs on EVERY update.sh, even when the agent
+# is already connected): lays down the apt/reboot wodle scripts the shared
+# `raspberry-pi` group config calls, and installs auditd + the D2 audit rules
+# (file-watch + privilege-escalation keys; deliberately NO execve rules -- per-
+# command events from 30s container healthchecks are volume without signal).
+# Manager side (group `default` + wodle/audit entries in `raspberry-pi`
+# agent.conf) was applied 2026-08-23; until this heal has fired on a Pi the
+# agent only logs local "command not found"/"file not available" warnings.
 set -uo pipefail   # deliberately NOT -e: soft-fail on network/apt hiccups
 
 EDGE_DIR="${EDGE_DIR:-/opt/d2-edge}"
@@ -22,12 +31,16 @@ WAZUH_MANAGER_DEFAULT="10.255.255.28"
 WAZUH_GROUPS="raspberry-pi,docker-host"
 WAZUH_APT="4.x"
 STATE=/var/ossec/var/run/wazuh-agentd.state
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROFILE_SRC="$SCRIPT_DIR/wazuh"            # scripts/wazuh/{*.sh,audit.rules} in this repo
+WODLE_DIR=/var/ossec/wodle-scripts
+AUDIT_RULES=/etc/audit/rules.d/wazuh.rules
 log() { echo "[wazuh] $*"; }
 
 if [[ $EUID -ne 0 ]]; then log "must run as root -- skipping" >&2; exit 0; fi
 
 # env_get from the shared lib (compose-dotenv semantics; reads $ENV_FILE).
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/shared/scripts/lib/envfile.sh"
+. "$(cd "$SCRIPT_DIR/.." && pwd)/shared/scripts/lib/envfile.sh"
 
 # --- gate ------------------------------------------------------------------
 DEPLOY_WAZUH="$(env_get DEPLOY_WAZUH)"; DEPLOY_WAZUH="${DEPLOY_WAZUH:-enabled}"
@@ -39,8 +52,43 @@ WAZUH_MANAGER="$(env_get WAZUH_MANAGER)"; WAZUH_MANAGER="${WAZUH_MANAGER:-$WAZUH
 AGENT_NAME="$(env_get EDGE_HOSTNAME)"
 if [[ -z "$AGENT_NAME" || "$AGENT_NAME" == "REPLACE_ME" ]]; then AGENT_NAME="$(hostname)"; fi
 
+# --- host profile heal (idempotent; needs the wazuh-agent package present) --
+# Returns 0 always. Only touches files owned by this profile.
+ensure_host_profile() {
+    dpkg -s wazuh-agent >/dev/null 2>&1 || return 0
+    getent group wazuh >/dev/null 2>&1 || return 0
+    [[ -d "$PROFILE_SRC" ]] || { log "WARN $PROFILE_SRC missing in repo -- profile skipped"; return 0; }
+    local changed=0 f
+    # 1) wodle scripts called by the shared raspberry-pi group config
+    install -d -m 755 -o root -g root "$WODLE_DIR"
+    for f in apt-check.sh apt-upgradable.sh apt-upgradable-list.sh reboot-required.sh; do
+        [[ -f "$PROFILE_SRC/$f" ]] || continue
+        if ! cmp -s "$PROFILE_SRC/$f" "$WODLE_DIR/$f" 2>/dev/null; then
+            install -m 750 -o root -g wazuh "$PROFILE_SRC/$f" "$WODLE_DIR/$f" && changed=1
+        fi
+    done
+    # 2) auditd + D2 rules (no execve)
+    if ! dpkg -s auditd >/dev/null 2>&1; then
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y -q auditd >/dev/null 2>&1; then
+            log "auditd installed"; changed=1
+        else
+            log "WARN auditd install failed -- next update.sh retries"
+        fi
+    fi
+    if dpkg -s auditd >/dev/null 2>&1 && [[ -f "$PROFILE_SRC/audit.rules" ]]; then
+        if ! cmp -s "$PROFILE_SRC/audit.rules" "$AUDIT_RULES" 2>/dev/null; then
+            install -m 640 -o root -g root "$PROFILE_SRC/audit.rules" "$AUDIT_RULES" \
+                && augenrules --load >/dev/null 2>&1 && changed=1
+        fi
+        systemctl enable --now auditd >/dev/null 2>&1 || true
+    fi
+    [[ $changed -eq 1 ]] && log "host profile applied (wodle scripts + auditd rules=$(auditctl -l 2>/dev/null | grep -c audit-wazuh))"
+    return 0
+}
+
 # --- idempotency: already enrolled + connected? ----------------------------
 if [[ -s /var/ossec/etc/client.keys && -x /var/ossec/bin/wazuh-control ]]; then
+    ensure_host_profile
     if [[ -f "$STATE" ]] && grep -q "status='connected'" "$STATE" 2>/dev/null; then
         log "already installed + connected as '$AGENT_NAME' -> $WAZUH_MANAGER -- nothing to do"
         exit 0
@@ -91,6 +139,7 @@ if [[ -f "$LIO" ]] && ! grep -q '^wazuh_command.remote_commands=1' "$LIO" 2>/dev
     echo 'wazuh_command.remote_commands=1' >> "$LIO"
     log "enabled wazuh_command.remote_commands"
 fi
+ensure_host_profile
 
 # Repair path: if the agent was installed earlier but never enrolled (no
 # client.keys), make sure the manager address is set before (re)starting so
