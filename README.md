@@ -36,7 +36,7 @@ nano /opt/d2-edge/.env
 | EDGE_SITE_ID | Short site ID, no spaces | northsyd |
 | TENANT_ID | Customer ID | d2002 |
 | TENANT_NAME | Customer name, no spaces | Acme_Corp |
-| TS_AUTHKEY | Tailscale auth key | tskey-auth-xxx |
+| TS_AUTHKEY | Fleet-wide Tailscale OAuth client secret (NOT a pre-auth key; preflight rejects `tskey-auth-*`). Same on every Pi — copy from an existing Pi's `/opt/d2-edge/.env` or `EDGE_TS_AUTHKEY` in `/opt/netbox/onboarding/.env`. Keep the `?ephemeral=false` suffix so the node is durable | tskey-client-xxxx?ephemeral=false |
 | RADIUS_SHARED_SECRET | RADIUS proxy secret | (generate randomly) |
 | LOCAL_CLIENT_SECRET | LAN RADIUS client secret | (generate randomly) |
 | LOCAL_CLIENT_SUBNET | Customer LAN subnet | 10.0.0.0/8 |
