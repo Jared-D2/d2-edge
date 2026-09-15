@@ -6,7 +6,7 @@
 
 **Architecture:** One fleet-wide **read-only GitHub deploy key** replaces both anonymous HTTPS access and the over-privileged full-account SSH key currently sitting on the office Pi. A new idempotent heal script (`scripts/setup-git-deploy-key.sh`) installs the key from `GIT_DEPLOY_KEY_B64` in `.env`, pins GitHub's host keys, sets the repo's `core.sshCommand`, and rewrites `origin` to the SSH URL. `update.sh` calls it as a host-heal; `bootstrap.sh` and the onboarding portal's "New Edge Pi" block use the same key pre-clone. The fleet converts **while the repo is still public**; the visibility flip is the last step.
 
-**Tech Stack:** bash (Pi scripts), plain-assert Python tests (repo convention, no pytest), `gh` CLI (GitHub admin), Ansible on `192.168.166.3` (`d2-deploy` wrapper), Flask onboarding portal on NetBox `192.168.166.5` (`/opt/netbox/onboarding/app.py`, not in git).
+**Tech Stack:** bash (Pi scripts), plain-assert Python tests (repo convention, no pytest), `gh` CLI (GitHub admin), Ansible on `192.168.166.3` (`d2-deploy` wrapper), Flask onboarding portal on the **Azure NetBox host `10.255.255.60`** (`https://netbox.internal.d2tech.com.au`, SSH `netbox_adm@10.255.255.60` with `~/.ssh/id_claude`, passwordless sudo; app at `/opt/netbox/onboarding/`, **git-tracked on-server**, edit as user `netbox`, commit via `tools/git-sync.sh`, `python3 -m unittest` is the gate). The old on-prem `192.168.166.5` is decommissioned.
 
 ---
 
@@ -21,7 +21,9 @@
 | Home/lab Pi `192.168.21.20` | unreachable today; previously noted as **https** origin |
 | 8 customer Pis (nib001 ×7, hom001 ×1) | unknown remote type; **Claude must never SSH to them** |
 | Ansible `.3` | `group_vars` already uses the SSH URL; `deploy-edge.yml` wraps `update.sh`; `edge-status.yml` does no fetch |
-| Anonymous consumers that break on flip | `README.md:25` curl one-liner, `bootstrap.sh:4-5` raw URL + HTTPS clone, portal "New Edge Pi" bootstrap block |
+| Anonymous consumers that break on flip | `README.md:25` curl one-liner, `bootstrap.sh:4-5` raw URL + HTTPS clone, portal `blueprints/onboard.py:509` bootstrap block |
+| Anonymous consumer that degrades gracefully | portal `edge_provision.py:205` `fetch_d2_edge_sha()` hits `api.github.com` unauthenticated → returns `unknown` after the flip. Harmless: `bootstrap.sh` and `update.sh` overwrite `GIT_SHA` from the local checkout. **No change.** |
+| Portal fleet secrets | `/opt/netbox/onboarding/.env` on `.60` (`EDGE_TS_AUTHKEY`, `EDGE_AGENT_TOKEN`, `EDGE_RADIUS_SHARED_SECRET`, `EDGE_RADSEC_CLIENT_SECRET`, `EDGE_AUVIK_*`, `EDGE_CONTROLLER_WS`); loaded in `edge_provision.py:41-51`, guarded at `blueprints/onboard.py:382` |
 | `update.sh` self-mod lag | a change to `update.sh` executes on the **second** run after it lands |
 | GitHub host keys | fetched via `gh api meta --jq '.ssh_keys[]'` on 2026-09-14, embedded in Task 2 |
 
@@ -39,8 +41,10 @@
 | `shared/scripts/bootstrap.sh` | SSH clone as `admin` with the deploy key; fail loud if key absent | Modify lines 4-5 and 190-203 |
 | `.env.template` | Document optional `GIT_DEPLOY_KEY_B64` | Modify (append section) |
 | `README.md` | Replace curl one-liner with the portal-driven flow | Modify lines 23-26 |
-| `/opt/netbox/onboarding/app.py` (on `.5`, NOT git) | Emit `GIT_DEPLOY_KEY_B64` in `.env` and the pre-clone bootstrap block | Modify |
-| `/opt/netbox/onboarding/.env` (on `.5`) | Holds `EDGE_GIT_DEPLOY_KEY_B64` fleet secret | Modify |
+| `/opt/netbox/onboarding/edge_provision.py` (on `.60`, portal git) | Load `EDGE_GIT_DEPLOY_KEY_B64`; emit `GIT_DEPLOY_KEY_B64` in `render_edge_env`; new `render_edge_bootstrap()` | Modify |
+| `/opt/netbox/onboarding/blueprints/onboard.py` (on `.60`, portal git) | Guard the new secret; use `render_edge_bootstrap()` instead of the inline curl block | Modify `:30-48`, `:382-385`, `:488-518` |
+| `/opt/netbox/onboarding/tests/test_edge_provision_bootstrap.py` (on `.60`, portal git) | unittest for the two renderers | Create |
+| `/opt/netbox/onboarding/.env` (on `.60`, gitignored) | Holds `EDGE_GIT_DEPLOY_KEY_B64` fleet secret | Modify |
 | `/opt/ansible/playbooks/edge-status.yml` (on `.3`, NOT git) | Report origin URL + deploy-key wiring per Pi | Modify |
 
 ---
@@ -69,37 +73,31 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ## Task 1: Generate the fleet deploy key and register it on GitHub
 
-The private key must live where fleet secrets already live: `/opt/netbox/onboarding/.env` on NetBox `.5`. Generate it **there** so it never sits on a laptop.
+The private key must live where fleet secrets already live: `/opt/netbox/onboarding/.env` on the Azure NetBox host `10.255.255.60`. Generate it **there** so it never sits on a laptop. Everything under `/opt/netbox/onboarding` is owned by `netbox:netbox`; the portal's `.gitignore` already excludes `.env*`, `.ssh/`, `id_*`, so a `keys/` directory of `id_*`-named files stays out of git — but name it `id_d2edge_deploy` to be safe.
 
-- [ ] **Step 1: Check reachability of `.5`** 🤖
+Host shorthand used below: `NB='ssh -i ~/.ssh/id_claude -o IdentitiesOnly=yes -o BatchMode=yes netbox_adm@10.255.255.60'` (verified 2026-09-15: reachable, passwordless sudo).
 
-```bash
-ssh -i ~/.ssh/id_claude -o IdentitiesOnly=yes -o ConnectTimeout=8 -o BatchMode=yes jaredc@192.168.166.5 'echo ok'
-```
-If this times out (it did on 2026-09-14), hand Steps 2-3 to Jared verbatim and wait for the `.pub` line back.
-
-- [ ] **Step 2: Generate the key on `.5`** 🤖 (or 🧑 if unreachable — run exactly this on `.5`)
+- [ ] **Step 1: Generate the key on `.60` as `netbox`** 🤖
 
 ```bash
-sudo install -d -m 700 /opt/netbox/onboarding/keys
-sudo ssh-keygen -t ed25519 -N "" -C "d2-edge-fleet-readonly" -f /opt/netbox/onboarding/keys/d2-edge-deploy
-sudo chmod 600 /opt/netbox/onboarding/keys/d2-edge-deploy
-sudo cat /opt/netbox/onboarding/keys/d2-edge-deploy.pub
+$NB 'sudo -u netbox install -d -m 700 /opt/netbox/onboarding/keys && sudo -u netbox ssh-keygen -t ed25519 -N "" -C "d2-edge-fleet-readonly" -f /opt/netbox/onboarding/keys/id_d2edge_deploy && sudo -u netbox chmod 600 /opt/netbox/onboarding/keys/id_d2edge_deploy && sudo cat /opt/netbox/onboarding/keys/id_d2edge_deploy.pub && sudo -u netbox git -C /opt/netbox/onboarding status --porcelain keys/'
 ```
-Expected: one line `ssh-ed25519 AAAA... d2-edge-fleet-readonly`.
+Expected: one line `ssh-ed25519 AAAA... d2-edge-fleet-readonly`, and the `git status` line prints **nothing** (ignored). If it prints `?? keys/`, add `keys/` to `.gitignore` in Task 7 before committing anything.
 
-- [ ] **Step 3: Append the base64 private key to the portal `.env`** 🤖 (or 🧑)
+- [ ] **Step 2: Append the base64 private key to the portal `.env`** 🤖
 
 ```bash
-sudo cp /opt/netbox/onboarding/.env /opt/netbox/onboarding/.env.pre-2026-09-14-deploy-key
-echo "EDGE_GIT_DEPLOY_KEY_B64=$(sudo base64 -w0 /opt/netbox/onboarding/keys/d2-edge-deploy)" | sudo tee -a /opt/netbox/onboarding/.env >/dev/null
-sudo grep -c '^EDGE_GIT_DEPLOY_KEY_B64=' /opt/netbox/onboarding/.env
+$NB 'sudo -u netbox cp /opt/netbox/onboarding/.env /opt/netbox/onboarding/.env.pre-2026-09-15-deploy-key && echo "EDGE_GIT_DEPLOY_KEY_B64=$(sudo base64 -w0 /opt/netbox/onboarding/keys/id_d2edge_deploy)" | sudo -u netbox tee -a /opt/netbox/onboarding/.env >/dev/null && sudo grep -c "^EDGE_GIT_DEPLOY_KEY_B64=" /opt/netbox/onboarding/.env && sudo stat -c "%U:%G %a" /opt/netbox/onboarding/.env'
 ```
-Expected: `1`.
+Expected: `1` and `netbox:netbox 600` (ownership/mode unchanged).
 
-- [ ] **Step 4: Register the public key as a READ-ONLY deploy key** 🤖
+- [ ] **Step 3: Copy the `.pub` to the scratchpad for Step 4** 🤖
 
-Save the `.pub` line to a temp file, then (no `--allow-write` = read-only):
+```bash
+$NB 'sudo cat /opt/netbox/onboarding/keys/id_d2edge_deploy.pub' > "$SCRATCH/d2-edge-deploy.pub" && cat "$SCRATCH/d2-edge-deploy.pub"
+```
+
+- [ ] **Step 4: Register the public key as a READ-ONLY deploy key** 🤖 (no `--allow-write` = read-only)
 
 ```bash
 gh repo deploy-key add "$SCRATCH/d2-edge-deploy.pub" --repo Jared-D2/d2-edge --title "d2-edge-fleet-readonly (edge Pis)"
@@ -109,7 +107,7 @@ Expected: one key, `read-only`.
 
 - [ ] **Step 5: Store the private key in the password manager** 🧑
 
-Copy the output of `sudo cat /opt/netbox/onboarding/keys/d2-edge-deploy` on `.5` into the D2 password manager under "d2-edge fleet deploy key (read-only)". This is the recovery copy if `.5` is ever rebuilt.
+Run on `.60` (`ssh netbox_adm@10.255.255.60`): `sudo cat /opt/netbox/onboarding/keys/id_d2edge_deploy` and save the output in the D2 password manager as "d2-edge fleet deploy key (read-only)". This is the recovery copy if the NetBox VM is ever rebuilt — the portal `.env` is not in git or any off-host backup.
 
 ---
 
@@ -602,59 +600,257 @@ Expected: `origin/main` now contains `scripts/setup-git-deploy-key.sh`. Verify: 
 
 ## Task 7: Onboarding portal emits the key and the pre-clone bootstrap block
 
-**Files (on NetBox `192.168.166.5`, NOT in git):**
-- Modify: `/opt/netbox/onboarding/app.py` — the `/api/onboard-pi` handler
-- Already modified in Task 1: `/opt/netbox/onboarding/.env`
+**Files (on `10.255.255.60`, portal git repo `/opt/netbox/onboarding`, owner `netbox:netbox`):**
+- Create: `edge_bootstrap.py` — pure renderers, no Django imports (unit-testable)
+- Create: `tests/test_edge_bootstrap.py`
+- Modify: `edge_provision.py:51` (load the secret) and `render_edge_env` (~line 220, emit the `.env` lines)
+- Modify: `blueprints/onboard.py:30-48` (imports), `:382-385` (secret guard), `:488-518` (params + bootstrap block)
+- Already modified in Task 1: `.env` (gitignored)
 
-Convention (from memory): back up to `/opt/netbox-onboarding-app.py.pre-<date>`, edit as root, `sudo systemctl restart netbox-onboarding.service`. If `.5` is unreachable from Claude's box, every step here becomes 🧑 — hand Jared the exact diff below.
+**Portal conventions (memory `netbox-onboarding-git-deploy`, still valid on `.60`):** repo == runtime. **Edit as `netbox`, never root** (`sudo -u netbox …`); a root git op leaves root-owned objects that block the service user. Commit with `sudo -u netbox tools/git-sync.sh "msg"` — it runs `python -m unittest discover -s tests` as a commit gate, prompts before adding untracked files, pushes to the on-host mirror, and offers a restart. gunicorn does **not** auto-reload: `sudo systemctl restart netbox-onboarding`. Rollback = `git restore --source=<sha>` + restart, no `.bak` files.
 
-- [ ] **Step 1: Locate the emitters** 🤖
+`$NB` below is the SSH shorthand from Task 1. Edit files by `scp`-ing to `/tmp` then `sudo -u netbox install -m 644 -o netbox -g netbox /tmp/x /opt/netbox/onboarding/x`, or with `sudo -u netbox` heredocs — never `sudo tee` as root into the tree.
+
+- [ ] **Step 1: Write the failing test** 🤖
+
+`tests/test_edge_bootstrap.py`:
+
+```python
+"""Unit tests for edge_bootstrap (pure renderers for the New Edge Pi flow).
+
+No Django: edge_bootstrap must stay import-clean so these run under the
+git-sync.sh unittest gate without stubs.
+"""
+
+import unittest
+
+import edge_bootstrap as eb
+
+
+class RenderEdgeBootstrapTests(unittest.TestCase):
+    KEY = "QUJD"  # base64("ABC") — shape only
+
+    def test_block_installs_key_pins_host_and_clones_over_ssh(self):
+        block = eb.render_edge_bootstrap(self.KEY)
+        self.assertIn(f"echo '{self.KEY}' | base64 -d | sudo tee {eb.DEPLOY_KEY_PATH}", block)
+        self.assertIn(eb.GITHUB_ED25519_HOST_KEY, block)
+        self.assertIn(f"git clone -c core.sshCommand='ssh -i {eb.DEPLOY_KEY_PATH}", block)
+        self.assertIn(f"{eb.D2_EDGE_SSH_ORIGIN} /opt/d2-edge", block)
+        self.assertIn("sudo bash /opt/d2-edge/shared/scripts/bootstrap.sh", block)
+        self.assertNotIn("raw.githubusercontent.com", block)
+        self.assertNotIn("https://github.com", block)
+
+    def test_key_file_is_created_0600_before_content_is_written(self):
+        lines = eb.render_edge_bootstrap(self.KEY).splitlines()
+        create = next(i for i, l in enumerate(lines)
+                      if l.startswith("sudo install -m 600") and eb.DEPLOY_KEY_PATH in l)
+        write = next(i for i, l in enumerate(lines) if "base64 -d" in l)
+        self.assertLess(create, write)
+
+    def test_operator_steps_after_bootstrap_are_preserved(self):
+        block = eb.render_edge_bootstrap(self.KEY)
+        self.assertIn("sudo nano /opt/d2-edge/.env", block)
+        self.assertIn("sudo bash /opt/d2-edge/shared/scripts/deploy-all.sh", block)
+
+    def test_missing_key_refuses_to_render(self):
+        with self.assertRaises(ValueError):
+            eb.render_edge_bootstrap("")
+
+
+class RenderEnvGitLinesTests(unittest.TestCase):
+    def test_env_lines_carry_key_for_update_sh_heal(self):
+        lines = eb.render_env_git_lines("QUJD")
+        self.assertIn("GIT_DEPLOY_KEY_B64=QUJD", lines)
+        self.assertTrue(lines[0].startswith("# --- Git (private repo)"))
+        self.assertEqual(lines[-1], "")
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run it, confirm it fails** 🤖
 
 ```bash
-ssh -i ~/.ssh/id_claude -o IdentitiesOnly=yes jaredc@192.168.166.5 'sudo grep -nE "onboard-pi|raw\.githubusercontent|bootstrap\.sh|EDGE_TS_AUTHKEY|AGENT_TOKEN=" /opt/netbox/onboarding/app.py'
+$NB 'cd /opt/netbox/onboarding && sudo -u netbox /opt/netbox/venv/bin/python -m unittest tests.test_edge_bootstrap 2>&1 | tail -3'
 ```
-Expected: the route decorator, the line building the `.env` text (where `AGENT_TOKEN=` is emitted from `EDGE_AGENT_TOKEN`), and the line(s) building the bootstrap command block containing the `raw.githubusercontent.com` curl.
+Expected: `ModuleNotFoundError: No module named 'edge_bootstrap'`.
 
-- [ ] **Step 2: Back up** 🤖
+- [ ] **Step 3: Create `edge_bootstrap.py`** 🤖
+
+```python
+"""Pure renderers for the New Edge Pi bootstrap flow (no Django imports).
+
+The d2-edge repo is PRIVATE (2026-09). A fresh Pi can no longer curl
+bootstrap.sh from raw.githubusercontent.com; it needs the fleet READ-ONLY
+deploy key on disk BEFORE it can clone. This module renders (a) the shell
+block the operator pastes on the Pi and (b) the .env lines that let
+update.sh keep that key healed afterwards (scripts/setup-git-deploy-key.sh
+in d2-edge). Kept Django-free so it is unit-testable under the git-sync gate.
+"""
+
+D2_EDGE_SSH_ORIGIN = "git@github.com:Jared-D2/d2-edge.git"
+DEPLOY_KEY_PATH = "/home/admin/.ssh/id_d2edge_deploy"
+KNOWN_HOSTS_PATH = "/home/admin/.ssh/known_hosts_github"
+# GitHub's published ed25519 host key (gh api meta, 2026-09-14). Pinned, not
+# ssh-keyscan'd. The Pi-side heal pins the full key set after the clone.
+GITHUB_ED25519_HOST_KEY = (
+    "github.com ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+)
+_SSH_CMD = (
+    f"ssh -i {DEPLOY_KEY_PATH} -o IdentitiesOnly=yes "
+    f"-o UserKnownHostsFile={KNOWN_HOSTS_PATH} -o StrictHostKeyChecking=yes"
+)
+
+
+def render_env_git_lines(key_b64: str) -> list[str]:
+    """.env lines carrying the deploy key for update.sh's self-heal."""
+    return [
+        "# --- Git (private repo) ---------------------------------------------------",
+        "# Fleet READ-ONLY GitHub deploy key (base64). update.sh installs it to",
+        f"# {DEPLOY_KEY_PATH} and keeps origin on {D2_EDGE_SSH_ORIGIN}.",
+        f"GIT_DEPLOY_KEY_B64={key_b64}",
+        "",
+    ]
+
+
+def render_edge_bootstrap(key_b64: str) -> str:
+    """Shell block the operator pastes on a fresh Pi (default user with sudo).
+
+    The two ``install … /dev/null`` lines create the key/known_hosts files
+    with their final mode BEFORE content is written, so the private key is
+    never world-readable even momentarily.
+    """
+    if not key_b64:
+        raise ValueError(
+            "EDGE_GIT_DEPLOY_KEY_B64 is not set — cannot render a bootstrap "
+            "that can clone the private repo"
+        )
+    return "\n".join([
+        "# 1. Install git, place the fleet read-only deploy key + pinned GitHub host key,",
+        "#    clone the private repo as admin, then bootstrap (prompts for hostname)",
+        "sudo apt-get update -qq && sudo apt-get install -y -qq git",
+        "sudo install -d -m 700 -o admin -g admin /home/admin/.ssh",
+        f"sudo install -m 600 -o admin -g admin /dev/null {DEPLOY_KEY_PATH}",
+        f"echo '{key_b64}' | base64 -d | sudo tee {DEPLOY_KEY_PATH} >/dev/null",
+        f"sudo install -m 644 -o admin -g admin /dev/null {KNOWN_HOSTS_PATH}",
+        f"echo '{GITHUB_ED25519_HOST_KEY}' | sudo tee {KNOWN_HOSTS_PATH} >/dev/null",
+        "sudo install -d -m 755 -o admin -g admin /opt/d2-edge",
+        f"sudo -u admin git clone -c core.sshCommand='{_SSH_CMD}' {D2_EDGE_SSH_ORIGIN} /opt/d2-edge",
+        "sudo bash /opt/d2-edge/shared/scripts/bootstrap.sh",
+        "",
+        "# 2. Paste the portal .env over the template it creates",
+        "sudo nano /opt/d2-edge/.env",
+        "#    Select all, delete, paste your .env, then Ctrl+X  Y  Enter",
+        "sudo sed -i 's/\r//' /opt/d2-edge/.env",
+        "sudo chmod 600 /opt/d2-edge/.env",
+        "",
+        "# 3. Deploy",
+        "sudo bash /opt/d2-edge/shared/scripts/deploy-all.sh",
+    ])
+```
+(The `'s/\r//'` line is copied verbatim from the existing `blueprints/onboard.py:515` — it is a literal carriage return inside the Python string, exactly as today.)
+
+- [ ] **Step 4: Run the tests, confirm they pass** 🤖
 
 ```bash
-sudo cp /opt/netbox/onboarding/app.py /opt/netbox-onboarding-app.py.pre-2026-09-14-deploy-key
+$NB 'cd /opt/netbox/onboarding && sudo -u netbox /opt/netbox/venv/bin/python -m unittest tests.test_edge_bootstrap -v 2>&1 | tail -4'
+```
+Expected: `Ran 5 tests … OK`.
+
+- [ ] **Step 5: Load the secret and emit it in `render_edge_env`** 🤖
+
+In `edge_provision.py`, directly after line 51 (`EDGE_RADSEC_CLIENT_SECRET = …`) add:
+
+```python
+# Fleet READ-ONLY GitHub deploy key (base64 OpenSSH private key). Shipped to
+# every Pi in .env so update.sh can keep pulling the PRIVATE d2-edge repo.
+# Same fleet-shared model as EDGE_AGENT_TOKEN. Rotate by adding a second deploy
+# key on the repo, rolling this value, then deleting the old key.
+EDGE_GIT_DEPLOY_KEY_B64 = os.environ.get("EDGE_GIT_DEPLOY_KEY_B64", "")
 ```
 
-- [ ] **Step 3: Emit `GIT_DEPLOY_KEY_B64` in the generated `.env`** 🤖
+Add to the imports block (after `from db_utils import pg_advisory_xact_lock`):
 
-Next to where `AGENT_TOKEN={os.environ.get("EDGE_AGENT_TOKEN", "")}` (or equivalent) is emitted, add the same pattern for the new key so the rendered `.env` gains:
-
-```
-# Fleet read-only GitHub deploy key (base64). update.sh installs it; keeps git pull working on the private repo.
-GIT_DEPLOY_KEY_B64=<value of EDGE_GIT_DEPLOY_KEY_B64>
+```python
+from edge_bootstrap import render_env_git_lines
 ```
 
-- [ ] **Step 4: Replace the bootstrap block** 🤖
+In `render_edge_env`, replace the three lines
 
-Replace the curl one-liner with this block (Python f-string / template — keep the file's existing style; `{key_b64}` is `EDGE_GIT_DEPLOY_KEY_B64` from the portal env):
+```python
+        f"AGENT_TOKEN={params['agent_token']}",
+        f"CONTROLLER_URL={params['controller_url']}",
+        "SENSOR_MODE=passive",
+        "",
+```
+with
+```python
+        f"AGENT_TOKEN={params['agent_token']}",
+        f"CONTROLLER_URL={params['controller_url']}",
+        "SENSOR_MODE=passive",
+        "",
+        *render_env_git_lines(params.get("git_deploy_key_b64", "")),
+```
+
+- [ ] **Step 6: Wire the route** 🤖
+
+In `blueprints/onboard.py`:
+
+1. Extend the `from edge_provision import (…)` block (lines 30-48) with `EDGE_GIT_DEPLOY_KEY_B64,` and add a new line `from edge_bootstrap import render_edge_bootstrap` after that block.
+2. Replace the guard at lines 382-385:
+```python
+    if not EDGE_TS_AUTHKEY or not EDGE_AGENT_TOKEN or not EDGE_GIT_DEPLOY_KEY_B64:
+        return jsonify({
+            "error": "Portal missing fleet secrets — set EDGE_TS_AUTHKEY, EDGE_AGENT_TOKEN and EDGE_GIT_DEPLOY_KEY_B64 in /opt/netbox/onboarding/.env"
+        }), 500
+```
+3. In the `render_edge_env({...})` call (line 488), add after `"radsec_client_secret": EDGE_RADSEC_CLIENT_SECRET,`:
+```python
+        "git_deploy_key_b64": EDGE_GIT_DEPLOY_KEY_B64,
+```
+4. Replace the whole `bootstrap = "\n".join([ … ])` list (lines 507-518) with:
+```python
+    bootstrap = render_edge_bootstrap(EDGE_GIT_DEPLOY_KEY_B64)
+```
+5. Update the audit string (line 524-526) so the disclosure record is honest:
+```python
+           f"(per-Pi minted ts_authkey + fleet secrets: agent_token, radius, radsec, auvik, git deploy key)")
+```
+
+- [ ] **Step 7: Full test gate + real-import smoke (no HTTP call, no side effects)** 🤖
 
 ```bash
-# --- D2 Edge bootstrap (private repo) ---
-sudo apt-get update -qq && sudo apt-get install -y -qq git
-sudo install -d -m 700 -o admin -g admin /home/admin/.ssh
-sudo install -m 600 -o admin -g admin /dev/null /home/admin/.ssh/id_d2edge_deploy
-echo '{key_b64}' | base64 -d | sudo tee /home/admin/.ssh/id_d2edge_deploy >/dev/null
-sudo install -m 644 -o admin -g admin /dev/null /home/admin/.ssh/known_hosts_github
-echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' | sudo tee /home/admin/.ssh/known_hosts_github >/dev/null
-sudo install -d -m 755 -o admin -g admin /opt/d2-edge
-sudo -u admin git clone -c core.sshCommand='ssh -i /home/admin/.ssh/id_d2edge_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=/home/admin/.ssh/known_hosts_github -o StrictHostKeyChecking=yes' git@github.com:Jared-D2/d2-edge.git /opt/d2-edge
-sudo bash /opt/d2-edge/shared/scripts/bootstrap.sh
+$NB 'cd /opt/netbox/onboarding && sudo -u netbox /opt/netbox/venv/bin/python -m unittest discover -s tests 2>&1 | tail -3'
 ```
+Expected: `OK` (same count as before + 5).
 
-(The `install /dev/null` lines create the files with the right mode *before* content is written, so the private key is never world-readable even momentarily. `bootstrap.sh` then runs `setup-git-deploy-key.sh`, which pins the full three-key set.)
-
-- [ ] **Step 5: Restart and smoke-test** 🤖
+Then prove the real module wiring with the venv (imports Django via `django_bootstrap`, touches no rows):
 
 ```bash
-sudo python3 -m py_compile /opt/netbox/onboarding/app.py && sudo systemctl restart netbox-onboarding.service && sleep 2 && systemctl is-active netbox-onboarding.service
+$NB 'cd /opt/netbox/onboarding && sudo -u netbox env EDGE_GIT_DEPLOY_KEY_B64=QUJD /opt/netbox/venv/bin/python -c "
+import edge_provision as e
+t = e.render_edge_env({\"edge_hostname\":\"x\",\"edge_site_id\":\"x\",\"site_slug\":\"x\",\"tenant_id\":\"x\",\"tenant_name\":\"x\",\"ts_authkey\":\"x\",\"radius_shared_secret\":\"x\",\"local_client_secret\":\"x\",\"auvik_username\":\"x\",\"auvik_api_key\":\"x\",\"auvik_domain\":\"x\",\"agent_token\":\"x\",\"controller_url\":\"x\",\"radsec_client_secret\":\"x\",\"git_deploy_key_b64\":e.EDGE_GIT_DEPLOY_KEY_B64})
+print(\"GIT_DEPLOY_KEY_B64=QUJD\" in t, e.EDGE_GIT_DEPLOY_KEY_B64)
+"'
 ```
-Expected: `active`. Then in the portal UI (🧑 or via the browser tools): New Edge Pi tab → generate for a throwaway hostname → confirm the `.env` pane contains `GIT_DEPLOY_KEY_B64=` with a long value and the bootstrap pane contains `git clone -c core.sshCommand=` and **no** `raw.githubusercontent.com`. Do not create a NetBox site for the throwaway if the form offers a dry-run; otherwise delete the site afterwards.
+Expected: `True QUJD`. Do **not** POST to `/api/onboard-pi` as a test — it creates a NetBox site + device, a Zabbix proxy, and mints a Tailscale key.
+
+- [ ] **Step 8: Commit via git-sync, then restart** 🤖
+
+Stage the new files first (git-sync prompts on untracked files; do it explicitly), then run the sync with a tty so its prompts render:
+
+```bash
+$NB 'cd /opt/netbox/onboarding && sudo -u netbox git add edge_bootstrap.py tests/test_edge_bootstrap.py && sudo -u netbox git status --porcelain'
+ssh -tt -i ~/.ssh/id_claude -o IdentitiesOnly=yes netbox_adm@10.255.255.60 'cd /opt/netbox/onboarding && sudo -u netbox tools/git-sync.sh "feat(onboard-pi): private-repo bootstrap via fleet read-only deploy key"'
+$NB 'sudo systemctl restart netbox-onboarding && sleep 2 && systemctl is-active netbox-onboarding && curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:5000/'
+```
+Expected: porcelain shows `A  edge_bootstrap.py`, `A  tests/test_edge_bootstrap.py`, `M  edge_provision.py`, `M  blueprints/onboard.py`; git-sync reports tests passed + pushed to `origin` (`/srv/git/netbox-onboarding.git`); then `active` and `200`. Answer "n" to git-sync's restart offer (the explicit restart follows). Verify no root-owned objects were left behind: `$NB 'sudo find /opt/netbox/onboarding/.git -not -user netbox | head -3'` → empty.
+
+- [ ] **Step 9: Eyeball in the UI** 🧑 (optional, read-only)
+
+Open https://netbox.internal.d2tech.com.au/onboarding/ → **New Edge Pi** tab. Do **not** submit. If you want a rendered sample, it is the same text as Step 7's `render_edge_bootstrap` output — a real submit is a real onboard.
 
 ---
 
@@ -705,7 +901,7 @@ Expected: both D2 Pis report `origin=git@github.com:Jared-D2/d2-edge.git deploy_
 
 Order matters: `.env` gets the key line → **two** `d2-deploy push` runs (self-mod lag) → audit shows `deploy_key=yes` everywhere reachable. Only then Task 10.
 
-The one-line append (same for every Pi; value from `sudo grep '^EDGE_GIT_DEPLOY_KEY_B64=' /opt/netbox/onboarding/.env | cut -d= -f2-` on `.5`):
+The one-line append (same for every Pi; value from `$NB 'sudo grep "^EDGE_GIT_DEPLOY_KEY_B64=" /opt/netbox/onboarding/.env | cut -d= -f2-'`, `$NB` being the `.60` SSH shorthand from Task 1):
 
 ```bash
 echo 'GIT_DEPLOY_KEY_B64=<paste value>' | sudo tee -a /opt/d2-edge/.env >/dev/null && sudo grep -c '^GIT_DEPLOY_KEY_B64=' /opt/d2-edge/.env
