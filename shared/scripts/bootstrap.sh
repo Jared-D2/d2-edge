@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="https://raw.githubusercontent.com/Jared-D2/d2-edge"
-REPO_GIT="https://github.com/Jared-D2/d2-edge.git"
+# The repo is PRIVATE. Clones/pulls authenticate with the fleet read-only
+# deploy key; the onboarding portal's "New Edge Pi" block installs the key
+# and the pinned GitHub host keys and clones BEFORE running this script.
+REPO_GIT="git@github.com:Jared-D2/d2-edge.git"
+DEPLOY_KEY=/home/admin/.ssh/id_d2edge_deploy
+DEPLOY_KNOWN_HOSTS=/home/admin/.ssh/known_hosts_github
 EDGE_DIR="/opt/d2-edge"
 
 echo "========================================"
@@ -191,16 +195,35 @@ sudo -u admin git config --global --add safe.directory /opt/d2-edge 2>/dev/null 
 echo ""
 echo "[7/8] Cloning d2-edge repo..."
 if [[ -d "${EDGE_DIR}/.git" ]]; then
+    # Normal path: the portal bootstrap block already cloned as admin with
+    # core.sshCommand set, so a plain pull as admin authenticates.
     echo "  Repo already exists, pulling latest..."
-    cd "${EDGE_DIR}" && git pull
+    chown -R admin:admin "${EDGE_DIR}/.git"
+    sudo -u admin git -C "${EDGE_DIR}" pull
 else
-    git clone "${REPO_GIT}" "${EDGE_DIR}"
+    # Hand-build fallback: the operator must have dropped the key + pinned
+    # host keys in place (both come from the portal's New Edge Pi tab).
+    if [[ ! -f "$DEPLOY_KEY" || ! -f "$DEPLOY_KNOWN_HOSTS" ]]; then
+        echo "ERROR: ${EDGE_DIR} is missing and ${DEPLOY_KEY} / ${DEPLOY_KNOWN_HOSTS} are not both present." >&2
+        echo "  The d2-edge repo is private. Run the bootstrap block from the onboarding" >&2
+        echo "  portal (New Edge Pi tab) -- it installs the key, pins github.com, clones," >&2
+        echo "  then runs this script." >&2
+        exit 1
+    fi
+    install -d -m 755 -o admin -g admin "${EDGE_DIR}"
+    sudo -u admin git clone \
+        -c core.sshCommand="ssh -i ${DEPLOY_KEY} -o IdentitiesOnly=yes -o UserKnownHostsFile=${DEPLOY_KNOWN_HOSTS} -o StrictHostKeyChecking=yes" \
+        "${REPO_GIT}" "${EDGE_DIR}"
 fi
 
-# Repo cloned as root; chown everything to admin so update.sh (git pull
-# runs as admin) can write .git state. Keep .env at root:root 600 — secrets.
+# Everything under the checkout belongs to admin (update.sh pulls as admin).
+# Keep .env at root:root 600 — secrets.
 chown -R admin:admin "${EDGE_DIR}"
 [[ -f "${EDGE_DIR}/.env" ]] && chown root:root "${EDGE_DIR}/.env" && chmod 600 "${EDGE_DIR}/.env"
+
+# Normalise the git auth wiring (pinned host keys, core.sshCommand, SSH
+# origin) now that the repo content is on disk. Idempotent.
+bash "${EDGE_DIR}/scripts/setup-git-deploy-key.sh"
 
 # Install auto-reboot drop-in now that the repo content is available.
 # Higher-numbered drop-in (52 vs stock 50) wins over distro defaults.
