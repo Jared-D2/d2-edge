@@ -199,6 +199,8 @@ if [[ -d "${EDGE_DIR}/.git" ]]; then
     # core.sshCommand set, so a plain pull as admin authenticates.
     echo "  Repo already exists, pulling latest..."
     chown -R admin:admin "${EDGE_DIR}/.git"
+    # Heal first: a legacy Pi (root-cloned over https://) needs origin + core.sshCommand rewritten before the pull can authenticate against the private repo.
+    bash "${EDGE_DIR}/scripts/setup-git-deploy-key.sh"
     sudo -u admin git -C "${EDGE_DIR}" pull
 else
     # Hand-build fallback: the operator must have dropped the key + pinned
@@ -211,8 +213,9 @@ else
         exit 1
     fi
     install -d -m 755 -o admin -g admin "${EDGE_DIR}"
+    # Keep identical to SSH_CMD in scripts/setup-git-deploy-key.sh.
     sudo -u admin git clone \
-        -c core.sshCommand="ssh -i ${DEPLOY_KEY} -o IdentitiesOnly=yes -o UserKnownHostsFile=${DEPLOY_KNOWN_HOSTS} -o StrictHostKeyChecking=yes" \
+        -c core.sshCommand="ssh -i '${DEPLOY_KEY}' -o IdentitiesOnly=yes -o UserKnownHostsFile='${DEPLOY_KNOWN_HOSTS}' -o StrictHostKeyChecking=yes -o BatchMode=yes" \
         "${REPO_GIT}" "${EDGE_DIR}"
 fi
 
