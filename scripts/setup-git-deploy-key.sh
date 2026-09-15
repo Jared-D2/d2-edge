@@ -21,12 +21,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EDGE_DIR="${EDGE_DIR:-/opt/d2-edge}"
 ENV_FILE="${ENV_FILE:-$EDGE_DIR/.env}"
 ADMIN_USER="${ADMIN_USER:-admin}"
+ADMIN_HOME="${ADMIN_HOME:-$(getent passwd "$ADMIN_USER" 2>/dev/null | cut -d: -f6)}"
 ADMIN_HOME="${ADMIN_HOME:-/home/$ADMIN_USER}"
 SSH_DIR="$ADMIN_HOME/.ssh"
 KEY_FILE="$SSH_DIR/id_d2edge_deploy"
 KNOWN_HOSTS="$SSH_DIR/known_hosts_github"
 SSH_ORIGIN="git@github.com:Jared-D2/d2-edge.git"
-SSH_CMD="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=yes"
+# Keep identical to the clone -c core.sshCommand in shared/scripts/bootstrap.sh and the portal's edge_bootstrap.py; drift just makes this heal re-log once, but keep them in step.
+SSH_CMD="ssh -i '$KEY_FILE' -o IdentitiesOnly=yes -o UserKnownHostsFile='$KNOWN_HOSTS' -o StrictHostKeyChecking=yes -o BatchMode=yes"
 
 # GitHub's published host keys (gh api meta --jq '.ssh_keys[]', 2026-09-14).
 # Pinned, NOT ssh-keyscan'd: trust-on-first-use over a customer WAN is not
@@ -49,26 +51,53 @@ as_admin() {
     fi
 }
 
-# install_file MODE SRC DST -- write only when absent or content differs.
-# Returns 0 if it wrote, 1 if already current.
+# install_file MODE SRC DST -- write only when absent or content differs, but
+# ALWAYS converge mode/owner (the portal's bootstrap block writes the key 0644).
+# Returns 0 if it wrote content, 1 if the content was already current.
 install_file() {
     local mode="$1" src="$2" dst="$3"
-    if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then return 1; fi
+    if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
+        if [[ "$(stat -c '%a %U %G' "$dst")" != "$mode $ADMIN_USER $ADMIN_USER" ]]; then
+            chmod "$mode" "$dst"
+            chown "$ADMIN_USER:$ADMIN_USER" "$dst"
+        fi
+        return 1
+    fi
     install -m "$mode" -o "$ADMIN_USER" -g "$ADMIN_USER" "$src" "$dst"
     return 0
 }
 
-tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+# 0. ~admin/.ssh: converge on every run, not just when a key arrives. A Pi
+# without the admin home is misprovisioned -- do not invent one.
+if [[ ! -d "$ADMIN_HOME" ]]; then
+    echo "[git-deploy-key] ERROR: admin home $ADMIN_HOME does not exist -- this Pi is misprovisioned" >&2
+    exit 1
+fi
+if [[ -d "$SSH_DIR" ]]; then
+    # install -d does NOT re-mode an existing directory.
+    chmod 700 "$SSH_DIR"
+    chown "$ADMIN_USER:$ADMIN_USER" "$SSH_DIR"
+else
+    install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$SSH_DIR"
+fi
+
+# Stage inside $SSH_DIR (0700, same filesystem as the destinations).
+tmp=$(mktemp "$SSH_DIR/.setup-git-deploy-key.XXXXXX"); trap 'rm -f "$tmp"' EXIT
+
+if [[ -e "$ENV_FILE" && ! -r "$ENV_FILE" ]]; then
+    log "NOTE: $ENV_FILE exists but is not readable as $(id -un); run as root"
+fi
 
 # 1. Key material: environment wins (bootstrap, pre-.env), then .env.
 key_b64="${GIT_DEPLOY_KEY_B64:-$(env_get GIT_DEPLOY_KEY_B64 "$ENV_FILE")}"
 if [[ -n "$key_b64" ]]; then
+    # ssh-keygen -y proves it parses AND is unencrypted (and catches truncation);
+    # a BEGIN-line grep passes on a half-written key. $tmp is mktemp'd 0600.
     if ! printf '%s' "$key_b64" | base64 -d > "$tmp" 2>/dev/null \
-       || ! grep -q -- '-----BEGIN OPENSSH PRIVATE KEY-----' "$tmp"; then
-        echo "[git-deploy-key] ERROR: GIT_DEPLOY_KEY_B64 is not a base64 OpenSSH private key" >&2
+       || ! ssh-keygen -y -P '' -f "$tmp" >/dev/null 2>&1; then
+        echo "[git-deploy-key] ERROR: GIT_DEPLOY_KEY_B64 is not a base64 OpenSSH private key (or it is passphrase-protected/truncated)" >&2
         exit 1
     fi
-    install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$SSH_DIR"
     if install_file 600 "$tmp" "$KEY_FILE"; then log "installed $KEY_FILE"; fi
 fi
 
@@ -93,7 +122,13 @@ if [[ -d "$EDGE_DIR/.git" ]]; then
     fi
     origin="$(as_admin git -C "$EDGE_DIR" remote get-url origin 2>/dev/null || true)"
     if [[ "$origin" != "$SSH_ORIGIN" ]]; then
-        as_admin git -C "$EDGE_DIR" remote set-url origin "$SSH_ORIGIN"
+        # A checkout with no origin at all (hand-built, or `git init`) must be
+        # wired up, not aborted on -- `remote set-url` fails when it is absent.
+        if [[ -z "$origin" ]]; then
+            as_admin git -C "$EDGE_DIR" remote add origin "$SSH_ORIGIN"
+        else
+            as_admin git -C "$EDGE_DIR" remote set-url origin "$SSH_ORIGIN"
+        fi
         log "origin: ${origin:-<none>} -> $SSH_ORIGIN"
     fi
 fi

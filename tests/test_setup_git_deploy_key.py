@@ -4,21 +4,38 @@
 Linux only (install -o, git, base64). Run on the Ansible control node:
     python3 tests/test_setup_git_deploy_key.py
 """
-import base64, os, pathlib, pwd, stat, subprocess, tempfile
+import atexit, base64, os, pathlib, pwd, shutil, stat, subprocess, tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "setup-git-deploy-key.sh"
 ME = pwd.getpwuid(os.getuid()).pw_name
-FAKE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nnotarealkey\n-----END OPENSSH PRIVATE KEY-----\n"
+
+# The script validates the key with `ssh-keygen -y`, so the fixture must be a
+# REAL unencrypted ed25519 key. Generated once per run; lives for the module.
+_KEYDIR = tempfile.mkdtemp(prefix="d2edge-testkey-")
+atexit.register(shutil.rmtree, _KEYDIR, True)
+subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test",
+                "-f", str(pathlib.Path(_KEYDIR, "id_fixture"))], check=True)
+FAKE_KEY = pathlib.Path(_KEYDIR, "id_fixture").read_text()
 FAKE_B64 = base64.b64encode(FAKE_KEY.encode()).decode()
+# Same key, last 40 chars lopped off: decodes cleanly, parses as nothing.
+BAD_KEY_B64 = base64.b64encode(FAKE_KEY[:-40].encode()).decode()
 SSH_ORIGIN = "git@github.com:Jared-D2/d2-edge.git"
 HTTPS_ORIGIN = "https://github.com/Jared-D2/d2-edge.git"
+KEY_ERR = "not a base64 OpenSSH private key"
+
+
+def expected_sshcmd(home):
+    return (f"ssh -i '{home}/.ssh/id_d2edge_deploy' -o IdentitiesOnly=yes"
+            f" -o UserKnownHostsFile='{home}/.ssh/known_hosts_github'"
+            f" -o StrictHostKeyChecking=yes -o BatchMode=yes")
 
 
 def sandbox(td, origin=HTTPS_ORIGIN, env_line=None):
     edge = pathlib.Path(td, "edge"); edge.mkdir()
     subprocess.run(["git", "-C", str(edge), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(edge), "remote", "add", "origin", origin], check=True)
+    if origin is not None:  # None = fresh `git init`, no origin remote at all
+        subprocess.run(["git", "-C", str(edge), "remote", "add", "origin", origin], check=True)
     home = pathlib.Path(td, "home"); home.mkdir()
     if env_line is not None:
         pathlib.Path(edge, ".env").write_text(env_line + "\n")
@@ -52,10 +69,15 @@ with tempfile.TemporaryDirectory() as td:
     assert git_cfg(edge, "remote.origin.url") == SSH_ORIGIN
     sshcmd = git_cfg(edge, "core.sshCommand")
     assert "IdentitiesOnly=yes" in sshcmd and str(key) in sshcmd and "StrictHostKeyChecking=yes" in sshcmd
-    # idempotent: second run changes nothing
+    assert "BatchMode=yes" in sshcmd, sshcmd
+    # never echo key material
+    out = r.stdout + r.stderr
+    assert FAKE_B64 not in out, out
+    assert FAKE_KEY.splitlines()[1] not in out, out
+    # idempotent: second run changes nothing and says nothing
     r2 = run(edge, home)
     assert r2.returncode == 0, r2.stderr
-    assert "installed" not in r2.stdout and "origin:" not in r2.stdout and "set core" not in r2.stdout, r2.stdout
+    assert r2.stdout == "", r2.stdout
 
 # 2. environment beats .env (bootstrap path: no .env yet)
 with tempfile.TemporaryDirectory() as td:
@@ -106,5 +128,61 @@ with tempfile.TemporaryDirectory() as td:
     assert r.returncode == 0, r.stderr
     assert "legacy key still present" in r.stdout and "SHA256:" in r.stdout, r.stdout
     assert (sshdir / "id_ed25519").exists()
+
+# 8. metadata drift only (portal wrote the key 0644 into a 0755 .ssh):
+#    perms converge, but content is unchanged so nothing is "installed"
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, env_line=f"GIT_DEPLOY_KEY_B64={FAKE_B64}")
+    sshdir = home / ".ssh"; sshdir.mkdir(); os.chmod(sshdir, 0o755)
+    key = sshdir / "id_d2edge_deploy"
+    key.write_text(FAKE_KEY); os.chmod(key, 0o644)
+    r = run(edge, home)
+    assert r.returncode == 0, r.stderr
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600, oct(key.stat().st_mode)
+    assert stat.S_IMODE(sshdir.stat().st_mode) == 0o700, oct(sshdir.stat().st_mode)
+    assert "installed" not in r.stdout, r.stdout
+    assert key.read_text() == FAKE_KEY
+
+# 9. checkout with NO origin remote at all (fresh git init): remote is added
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, origin=None)
+    r = run(edge, home, {"GIT_DEPLOY_KEY_B64": FAKE_B64})
+    assert r.returncode == 0, r.stderr
+    assert git_cfg(edge, "remote.origin.url") == SSH_ORIGIN
+
+# 10. stale core.sshCommand is rewritten to exactly the wanted string
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, env_line=f"GIT_DEPLOY_KEY_B64={FAKE_B64}")
+    subprocess.run(["git", "-C", str(edge), "config", "core.sshCommand", "ssh -o Foo=bar"],
+                   check=True)
+    r = run(edge, home)
+    assert r.returncode == 0, r.stderr
+    assert git_cfg(edge, "core.sshCommand") == expected_sshcmd(home), git_cfg(edge, "core.sshCommand")
+
+# 11. truncated key: decodes, but ssh-keygen cannot parse it -> exit 1
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, env_line=f"GIT_DEPLOY_KEY_B64={BAD_KEY_B64}")
+    r = run(edge, home)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert KEY_ERR in r.stderr, r.stderr
+    assert not (home / ".ssh" / "id_d2edge_deploy").exists()
+
+# 12. undecodable base64: exit 1, same message
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td)
+    r = run(edge, home, {"GIT_DEPLOY_KEY_B64": "!!!!"})
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert KEY_ERR in r.stderr, r.stderr
+    assert not (home / ".ssh" / "id_d2edge_deploy").exists()
+
+# 13. ADMIN_HOME does not exist (misprovisioned Pi): exit 1, create nothing
+with tempfile.TemporaryDirectory() as td:
+    edge, _ = sandbox(td, env_line=f"GIT_DEPLOY_KEY_B64={FAKE_B64}")
+    home = pathlib.Path(td, "no-such-home")
+    r = run(edge, home)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "ERROR" in r.stderr, r.stderr
+    assert not home.exists()
+    assert git_cfg(edge, "remote.origin.url") == HTTPS_ORIGIN
 
 print("ok")
