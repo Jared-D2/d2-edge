@@ -634,7 +634,8 @@ class RenderEdgeBootstrapTests(unittest.TestCase):
         block = eb.render_edge_bootstrap(self.KEY)
         self.assertIn(f"echo '{self.KEY}' | base64 -d | sudo tee {eb.DEPLOY_KEY_PATH}", block)
         self.assertIn(eb.GITHUB_ED25519_HOST_KEY, block)
-        self.assertIn(f"git clone -c core.sshCommand='ssh -i {eb.DEPLOY_KEY_PATH}", block)
+        self.assertIn(f"git clone -c core.sshCommand=\"ssh -i '{eb.DEPLOY_KEY_PATH}'", block)
+        self.assertIn("-o BatchMode=yes", block)
         self.assertIn(f"{eb.D2_EDGE_SSH_ORIGIN} /opt/d2-edge", block)
         self.assertIn("sudo bash /opt/d2-edge/shared/scripts/bootstrap.sh", block)
         self.assertNotIn("raw.githubusercontent.com", block)
@@ -698,9 +699,11 @@ GITHUB_ED25519_HOST_KEY = (
     "github.com ssh-ed25519 "
     "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 )
+# Keep identical to SSH_CMD in d2-edge scripts/setup-git-deploy-key.sh.
 _SSH_CMD = (
-    f"ssh -i {DEPLOY_KEY_PATH} -o IdentitiesOnly=yes "
-    f"-o UserKnownHostsFile={KNOWN_HOSTS_PATH} -o StrictHostKeyChecking=yes"
+    f"ssh -i '{DEPLOY_KEY_PATH}' -o IdentitiesOnly=yes "
+    f"-o UserKnownHostsFile='{KNOWN_HOSTS_PATH}' -o StrictHostKeyChecking=yes "
+    "-o BatchMode=yes"
 )
 
 
@@ -737,7 +740,7 @@ def render_edge_bootstrap(key_b64: str) -> str:
         f"sudo install -m 644 -o admin -g admin /dev/null {KNOWN_HOSTS_PATH}",
         f"echo '{GITHUB_ED25519_HOST_KEY}' | sudo tee {KNOWN_HOSTS_PATH} >/dev/null",
         "sudo install -d -m 755 -o admin -g admin /opt/d2-edge",
-        f"sudo -u admin git clone -c core.sshCommand='{_SSH_CMD}' {D2_EDGE_SSH_ORIGIN} /opt/d2-edge",
+        f'sudo -u admin git clone -c core.sshCommand="{_SSH_CMD}" {D2_EDGE_SSH_ORIGIN} /opt/d2-edge',
         "sudo bash /opt/d2-edge/shared/scripts/bootstrap.sh",
         "",
         "# 2. Paste the portal .env over the template it creates",
@@ -1006,6 +1009,16 @@ Expected: listing shows `id_d2edge_deploy` and `known_hosts_github`, no `id_ed25
 Update `reference_d2_edge_stack.md` (Repo section: private, deploy key path, bootstrap-via-portal) and `project_fleet_rollout_ansible.md` (the "admin has the GitHub deploy key" sentence now means `id_d2edge_deploy`, read-only). Add a `MEMORY.md` line for this plan's outcome.
 
 ---
+
+## Runbook: GitHub host-key rotation (added after review, 2026-09-15)
+
+Every Pi pins GitHub's three published host keys in `/home/admin/.ssh/known_hosts_github` with `StrictHostKeyChecking=yes`. If GitHub rotates a key (it did in March 2023), every `git pull` fails with `HOST KEY VERIFICATION FAILED`, and the corrected pin ships in the repo the Pis can no longer pull. Recovery is out-of-band, per Pi, as `admin` (Claude: D2 Pis only; Jared: customer Pis):
+
+```bash
+gh api meta --jq '.ssh_keys[] | "github.com " + .' > /tmp/known_hosts_github   # on the laptop
+scp /tmp/known_hosts_github admin@<pi>:/home/admin/.ssh/known_hosts_github      # per Pi
+```
+then `d2-deploy push <target>` twice (the heal re-pins from the repo copy on the second run). Update `GITHUB_HOST_KEYS` in `scripts/setup-git-deploy-key.sh` and `GITHUB_ED25519_HOST_KEY` in the portal's `edge_bootstrap.py` in the same change.
 
 ## Not in scope (decided 2026-09-14)
 
