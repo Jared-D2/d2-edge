@@ -192,6 +192,17 @@ fi
 if [[ -x "$EDGE_DIR/scripts/setup-svc-ansible.sh" ]]; then
     bash "$EDGE_DIR/scripts/setup-svc-ansible.sh"
 fi
+# Private-repo git auth: installs the fleet READ-ONLY deploy key from
+# GIT_DEPLOY_KEY_B64 (.env) and switches origin https:// -> SSH with pinned
+# GitHub host keys. Self-mod lag applies: the first update.sh after this
+# landed pulls the code, the SECOND executes this hook -- so the fleet must
+# convert (two pushes) BEFORE the repo flips private, because the [1/6]
+# pull above is what breaks on an unconverted https:// Pi. On such a Pi
+# with no key this only warns. Fail-loud on purpose (no || true): a bad
+# key value means the next pull would fail anyway.
+if [[ -x "$EDGE_DIR/scripts/setup-git-deploy-key.sh" ]]; then
+    bash "$EDGE_DIR/scripts/setup-git-deploy-key.sh"
+fi
 # Wazuh agent: idempotent, FAIL-SOFT install + enrolment of the native Wazuh
 # agent for host security monitoring (package/CVE inventory, FIM, auditd).
 # Gated by DEPLOY_WAZUH in .env (default enabled). Self-arms like the heals
