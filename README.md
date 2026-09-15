@@ -6,9 +6,9 @@ MSP edge stack for customer sites. Runs on Raspberry Pi 5.
 
 | Service | Purpose | LAN Port |
 |---|---|---|
-| tailscale | Secure tunnel to Azure | � |
+| tailscale | Secure tunnel to Azure | — |
 | syslog-proxy | Forwards syslog to Graylog | UDP/TCP 514 |
-| zabbix-proxy | Monitoring proxy | � |
+| zabbix-proxy | Monitoring proxy | — |
 | freeradius-proxy | RADIUS proxy | UDP 1812/1813 |
 | auvik | Network discovery | — |
 | d2-agent | Network test agent | TCP 8080, TCP 5201 (iperf3) |
@@ -20,12 +20,15 @@ MSP edge stack for customer sites. Runs on Raspberry Pi 5.
 - Fresh Raspberry Pi OS Lite 64-bit
 - SSH access
 
-### Step 1 � Bootstrap
-```bash
-curl -sSL https://raw.githubusercontent.com/Jared-D2/d2-edge/main/shared/scripts/bootstrap.sh | sudo bash
-```
+### Step 1 — Bootstrap
+The repo is private. Open the onboarding portal → **New Edge Pi** tab, fill in the
+site, and paste the generated **bootstrap block** into the Pi's shell. It installs the
+fleet read-only deploy key, pins github.com, clones `/opt/d2-edge` as `admin`, then runs
+`shared/scripts/bootstrap.sh`. (Hand-building without the portal: place the key at
+`/home/admin/.ssh/id_d2edge_deploy` and the pinned host keys at
+`/home/admin/.ssh/known_hosts_github` first, then `sudo bash bootstrap.sh`.)
 
-### Step 2 � Configure
+### Step 2 — Configure
 ```bash
 nano /opt/d2-edge/.env
 ```
@@ -40,9 +43,9 @@ nano /opt/d2-edge/.env
 | RADIUS_SHARED_SECRET | RADIUS proxy secret | (generate randomly) |
 | LOCAL_CLIENT_SECRET | LAN RADIUS client secret | (generate randomly) |
 | LOCAL_CLIENT_SUBNET | Customer LAN subnet | 10.0.0.0/8 |
-| AUVIK_API_KEY | From Auvik portal | � |
+| AUVIK_API_KEY | From Auvik portal | — |
 
-### Step 3 � Deploy
+### Step 3 — Deploy
 ```bash
 sudo bash /opt/d2-edge/shared/scripts/deploy-all.sh
 ```
