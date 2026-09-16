@@ -113,6 +113,8 @@ Run on `.60` (`ssh netbox_adm@10.255.255.60`): `sudo cat /opt/netbox/onboarding/
 
 ## Task 2: The heal script (TDD)
 
+> **Implemented 2026-09-15/16.** The code blocks below are the ORIGINAL spec; review-driven fix commits (`9ae586f` and the fix-pass-2 commits after `1da79ee`) changed the script: `install_file` converges mode/owner even when content matches; a missing `origin` is `remote add`ed; the key is validated with `ssh-keygen -y -P ''` (rejects passphrase-protected/truncated keys); `SSH_CMD` single-quotes paths and adds `-o BatchMode=yes`; `ADMIN_HOME` comes from `getent`; the temp file lives in `~admin/.ssh`; an existing key file is validated (warning); a `git ls-remote` probe warns when the wiring cannot reach GitHub (`GIT_DEPLOY_KEY_NO_REMOTE_CHECK=1` skips it, test harness only); the legacy key is detected with or without `.pub`. **The committed files are canonical**; the test file grew to ~17 cases. Read the blobs, not this section, when re-deriving behaviour.
+
 **Files:**
 - Create: `scripts/setup-git-deploy-key.sh`
 - Create: `tests/test_setup_git_deploy_key.py`
@@ -385,6 +387,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ## Task 3: Wire the heal into `update.sh` and document the `.env` key
 
+> **Implemented, then moved (final review).** The hook now lives in `update.sh` step **[1/6]**, after the ownership-heal loop and BEFORE `sudo -u admin git pull`, so a Pi whose git wiring drifted self-repairs on the same run instead of dying at the pull (svc_ansible can only run update.sh, so there was no scripted way back). The two-run self-mod lag is unchanged. Also: the `.env.dedup.$$` temp is now created under `umask 077` because `.env` carries a fleet credential, and `.env.template` ships the key **commented** (`#GIT_DEPLOY_KEY_B64=`) so Task 9's append yields exactly one line.
+
 **Files:**
 - Modify: `shared/scripts/update.sh` (insert after the `setup-svc-ansible.sh` block ending at line 194)
 - Modify: `.env.template` (append before the `# --- OOB console` section)
@@ -449,6 +453,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ---
 
 ## Task 4: `bootstrap.sh` clones the private repo with the deploy key
+
+> **Implemented, then amended (reviews).** The final `[7/8]` block differs from the spec below: the "repo already exists" branch chowns the WHOLE tree to admin (legacy root-cloned trees), re-asserts `.env` root:600, runs the heal (guarded with `-x`, warns if absent) and THEN pulls as admin; the fresh-clone branch uses the byte-identical quoted `core.sshCommand` with `-o BatchMode=yes`; the post-clone heal call is guarded too. The committed file is canonical.
 
 **Files:**
 - Modify: `shared/scripts/bootstrap.sh:4-5` and `:190-203`
@@ -753,6 +759,8 @@ def render_edge_bootstrap(key_b64: str) -> str:
         "sudo bash /opt/d2-edge/shared/scripts/deploy-all.sh",
     ])
 ```
+**Shell-history note (final review #17):** the pasted block puts the base64 key into the operator's `~/.bash_history`. The rendered block therefore starts with `export HISTCONTROL=ignoreboth` and the `echo '<key>' | base64 -d …` line is emitted with a leading space so it is not recorded. The portal page and the clipboard still carry it — treat the rendered block as a credential.
+
 (The `'s/\r//'` line is copied verbatim from the existing `blueprints/onboard.py:515` — it is a literal carriage return inside the Python string, exactly as today.)
 
 - [ ] **Step 4: Run the tests, confirm they pass** 🤖
@@ -946,7 +954,7 @@ Expected: `failed=0`; second-run output shows `[git-deploy-key] installed ...` p
 ```bash
 ssh -i ~/.ssh/id_claude -o IdentitiesOnly=yes jaredc@192.168.166.3 'd2-deploy status device_roles_edge_pi' | grep -E "origin=|UNREACHABLE"
 ```
-**Gate:** every reachable Pi shows `origin=git@github.com:Jared-D2/d2-edge.git deploy_key=yes`. List any unreachable Pi by name — they go into the straggler runbook and do NOT block the flip (their running containers are unaffected; only their next `update.sh` is).
+**Gate:** every reachable Pi shows `origin=git@github.com:Jared-D2/d2-edge.git deploy_key=yes`. List any unreachable Pi by name — they go into the straggler runbook and do NOT block the flip (their running containers are unaffected; only their next `update.sh` is). An unreachable Pi that already holds the new code (HEAD at or after the Task 6 merge) self-converts on its next run once its `.env` has the key line, because the heal runs before the pull.
 
 ---
 
@@ -981,11 +989,13 @@ echo 'GIT_DEPLOY_KEY_B64=<value>' | sudo tee -a /opt/d2-edge/.env >/dev/null
 sudo install -d -m 700 -o admin -g admin /home/admin/.ssh
 sudo install -m 600 -o admin -g admin /dev/null /home/admin/.ssh/id_d2edge_deploy
 echo '<value>' | base64 -d | sudo tee /home/admin/.ssh/id_d2edge_deploy >/dev/null
+sudo install -m 644 -o admin -g admin /dev/null /home/admin/.ssh/known_hosts_github
+gh api meta --jq '.ssh_keys[] | "github.com " + .' | sudo tee /home/admin/.ssh/known_hosts_github >/dev/null   # run `gh api` on the laptop and paste the 3 lines if the Pi has no gh
 sudo -u admin git -C /opt/d2-edge remote set-url origin git@github.com:Jared-D2/d2-edge.git
-sudo -u admin git -C /opt/d2-edge config core.sshCommand 'ssh -i /home/admin/.ssh/id_d2edge_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
+sudo -u admin git -C /opt/d2-edge config core.sshCommand "ssh -i '/home/admin/.ssh/id_d2edge_deploy' -o IdentitiesOnly=yes -o UserKnownHostsFile='/home/admin/.ssh/known_hosts_github' -o StrictHostKeyChecking=yes -o BatchMode=yes"
 sudo bash /opt/d2-edge/shared/scripts/update.sh && sudo bash /opt/d2-edge/shared/scripts/update.sh
 ```
-The second `update.sh` runs the heal, which replaces `accept-new` with the pinned host keys.
+No trust-on-first-use anywhere: the host keys are pinned by hand exactly as the heal pins them. With the heal in `[1/6]`, a Pi that had already pulled the new code before it went dark only needs the `.env` line appended; its next `update.sh` self-converts before pulling.
 
 ---
 
