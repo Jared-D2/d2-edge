@@ -198,9 +198,15 @@ if [[ -d "${EDGE_DIR}/.git" ]]; then
     # Normal path: the portal bootstrap block already cloned as admin with
     # core.sshCommand set, so a plain pull as admin authenticates.
     echo "  Repo already exists, pulling latest..."
-    chown -R admin:admin "${EDGE_DIR}/.git"
+    # Legacy trees were cloned as root; the pull below runs as admin.
+    chown -R admin:admin "${EDGE_DIR}"
+    [[ -f "${EDGE_DIR}/.env" ]] && chown root:root "${EDGE_DIR}/.env" && chmod 600 "${EDGE_DIR}/.env"
     # Heal first: a legacy Pi (root-cloned over https://) needs origin + core.sshCommand rewritten before the pull can authenticate against the private repo.
-    bash "${EDGE_DIR}/scripts/setup-git-deploy-key.sh"
+    if [[ -x "${EDGE_DIR}/scripts/setup-git-deploy-key.sh" ]]; then
+        bash "${EDGE_DIR}/scripts/setup-git-deploy-key.sh"
+    else
+        echo "  WARNING: scripts/setup-git-deploy-key.sh absent (pre-migration checkout) -- pulling over the existing origin" >&2
+    fi
     sudo -u admin git -C "${EDGE_DIR}" pull
 else
     # Hand-build fallback: the operator must have dropped the key + pinned
@@ -226,7 +232,11 @@ chown -R admin:admin "${EDGE_DIR}"
 
 # Normalise the git auth wiring (pinned host keys, core.sshCommand, SSH
 # origin) now that the repo content is on disk. Idempotent.
-bash "${EDGE_DIR}/scripts/setup-git-deploy-key.sh"
+if [[ -x "${EDGE_DIR}/scripts/setup-git-deploy-key.sh" ]]; then
+    bash "${EDGE_DIR}/scripts/setup-git-deploy-key.sh"
+else
+    echo "  WARNING: scripts/setup-git-deploy-key.sh absent (pre-migration checkout) -- git auth not normalised" >&2
+fi
 
 # Install auto-reboot drop-in now that the repo content is available.
 # Higher-numbered drop-in (52 vs stock 50) wins over distro defaults.

@@ -24,9 +24,18 @@ MSP edge stack for customer sites. Runs on Raspberry Pi 5.
 The repo is private. Open the onboarding portal → **New Edge Pi** tab, fill in the
 site, and paste the generated **bootstrap block** into the Pi's shell. It installs the
 fleet read-only deploy key, pins github.com, clones `/opt/d2-edge` as `admin`, then runs
-`shared/scripts/bootstrap.sh`. (Hand-building without the portal: place the key at
-`/home/admin/.ssh/id_d2edge_deploy` and the pinned host keys at
-`/home/admin/.ssh/known_hosts_github` first, then `sudo bash bootstrap.sh`.)
+`shared/scripts/bootstrap.sh`.
+
+Hand-building without the portal: the repo is private, so there is no way to fetch
+`bootstrap.sh` anonymously — place the deploy key at `/home/admin/.ssh/id_d2edge_deploy`
+(0600) and GitHub's host keys at `/home/admin/.ssh/known_hosts_github` first, then:
+
+```bash
+sudo -u admin git clone \
+    -c core.sshCommand="ssh -i '/home/admin/.ssh/id_d2edge_deploy' -o IdentitiesOnly=yes -o UserKnownHostsFile='/home/admin/.ssh/known_hosts_github' -o StrictHostKeyChecking=yes -o BatchMode=yes" \
+    git@github.com:Jared-D2/d2-edge.git /opt/d2-edge
+sudo bash /opt/d2-edge/shared/scripts/bootstrap.sh
+```
 
 ### Step 2 — Configure
 ```bash
