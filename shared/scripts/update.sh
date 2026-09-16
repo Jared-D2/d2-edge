@@ -93,6 +93,8 @@ sudo -u admin git ls-files | xargs -rn1 dirname | sort -u \
 # purpose (no || true): a bad key value would break the pull anyway.
 if [[ -x "$EDGE_DIR/scripts/setup-git-deploy-key.sh" ]]; then
     bash "$EDGE_DIR/scripts/setup-git-deploy-key.sh"
+else
+    echo "  WARNING: scripts/setup-git-deploy-key.sh absent or not executable -- pulling over the existing origin" >&2
 fi
 sudo -u admin git pull
 # Stamp current commit into .env so d2-agent reports the running version.

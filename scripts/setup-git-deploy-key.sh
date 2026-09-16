@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Point this Pi's /opt/d2-edge checkout at the PRIVATE GitHub repo using the
-# fleet READ-ONLY deploy key. Idempotent -- runs on every update.sh ([1/6],
-# before the pull) and at the end of bootstrap.sh.
+# fleet READ-ONLY deploy key. Idempotent -- runs from update.sh [1/6] (before
+# the pull) and twice in bootstrap.sh: before the admin pull in the
+# repo-exists branch, and again after the fresh clone.
 #
 # Why: the d2-edge repo is private; anonymous https:// pulls 404. Every Pi
 # needs (a) the deploy key and (b) an SSH origin. The key is fleet-shared
@@ -82,8 +83,9 @@ else
 fi
 
 # Stage inside $SSH_DIR (0700, same filesystem as the destinations). Sweep
-# temps a killed earlier run left behind before making a new one.
-rm -f "$SSH_DIR"/.setup-git-deploy-key.* 2>/dev/null || true
+# temps a killed earlier run left behind -- but only ones older than an hour,
+# so a concurrent run's live temp is never pulled out from under it.
+find "$SSH_DIR" -maxdepth 1 -name '.setup-git-deploy-key.*' -mmin +60 -delete 2>/dev/null || true
 tmp=$(mktemp "$SSH_DIR/.setup-git-deploy-key.XXXXXX"); trap 'rm -f "$tmp"' EXIT
 
 if [[ -e "$ENV_FILE" && ! -r "$ENV_FILE" ]]; then
@@ -100,11 +102,20 @@ if [[ -n "$key_b64" ]]; then
     # a BEGIN-line grep passes on a half-written key. $tmp is mktemp'd 0600.
     if ! printf '%s' "$key_b64" | base64 -d > "$tmp" 2>/dev/null \
        || ! ssh-keygen -y -P '' -f "$tmp" >/dev/null 2>&1; then
-        echo "[git-deploy-key] ERROR: GIT_DEPLOY_KEY_B64 is not a base64 OpenSSH private key (or it is passphrase-protected/truncated)" >&2
-        exit 1
+        # A fat-fingered .env must not strand a Pi that already holds a good
+        # key: keep it and carry on as if no new material arrived this run
+        # ($tmp holds the garbage, so nothing gets installed from it). Only a
+        # bad value with no usable key to fall back on is fatal.
+        if [[ -f "$KEY_FILE" ]] && ssh-keygen -y -P '' -f "$KEY_FILE" >/dev/null 2>&1; then
+            log "WARNING: GIT_DEPLOY_KEY_B64 is not a base64 OpenSSH private key (or it is passphrase-protected/truncated) -- keeping the existing valid $KEY_FILE"
+        else
+            echo "[git-deploy-key] ERROR: GIT_DEPLOY_KEY_B64 is not a base64 OpenSSH private key (or it is passphrase-protected/truncated)" >&2
+            exit 1
+        fi
+    else
+        if install_file 600 "$tmp" "$KEY_FILE"; then log "installed $KEY_FILE"; fi
+        key_material=1
     fi
-    if install_file 600 "$tmp" "$KEY_FILE"; then log "installed $KEY_FILE"; fi
-    key_material=1
 fi
 
 # 2. Without a key there is nothing to wire -- but shout if the pull will break.
@@ -146,10 +157,11 @@ if [[ -d "$EDGE_DIR/.git" ]]; then
         log "origin: ${origin:-<none>} -> $SSH_ORIGIN"
     fi
     # Prove the wiring end-to-end so a dead key shows up in THIS run's output,
-    # not one update later. BatchMode=yes means it cannot hang. Skippable for
-    # the offline test harness only.
+    # not one update later. BatchMode=yes prevents prompts and timeout 20
+    # bounds a dead WAN, so it cannot stall the update. Skippable for the
+    # offline test harness only.
     if [[ -z "${GIT_DEPLOY_KEY_NO_REMOTE_CHECK:-}" ]] \
-       && ! as_admin git -C "$EDGE_DIR" ls-remote --exit-code origin HEAD >/dev/null 2>&1; then
+       && ! as_admin timeout 20 env GIT_TERMINAL_PROMPT=0 git -C "$EDGE_DIR" ls-remote --exit-code origin HEAD >/dev/null 2>&1; then
         log "WARNING: origin is wired to the deploy key but 'git ls-remote origin' failed -- check WAN, the key on GitHub, and the pinned host keys"
     fi
 fi
@@ -162,5 +174,7 @@ for f in "$SSH_DIR/id_ed25519.pub" "$SSH_DIR/id_ed25519"; do
     if [[ -f "$f" ]]; then legacy_key="$f"; break; fi
 done
 if [[ -n "$legacy_key" ]]; then
-    log "NOTICE: legacy key still present: $(ssh-keygen -lf "$legacy_key" 2>/dev/null || echo "$legacy_key") -- revoke on GitHub once the fleet is converted, then delete it"
+    # </dev/null: ssh-keygen prompts for a passphrase on an encrypted private
+    # key, which would swallow the caller's stdin mid-update.
+    log "NOTICE: legacy key still present: $(ssh-keygen -lf "$legacy_key" </dev/null 2>/dev/null || echo "$legacy_key") -- revoke on GitHub once the fleet is converted, then delete it"
 fi

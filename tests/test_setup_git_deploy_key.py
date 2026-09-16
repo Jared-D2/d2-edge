@@ -3,8 +3,11 @@
 
 Linux only (install -o, git, base64). Run on the Ansible control node:
     python3 tests/test_setup_git_deploy_key.py
+
+Assumes the runner's primary group name equals its username: the script chowns
+to "$ADMIN_USER:$ADMIN_USER" and the harness sets ADMIN_USER to the runner.
 """
-import atexit, base64, os, pathlib, pwd, re, shutil, stat, subprocess, tempfile
+import atexit, base64, os, pathlib, pwd, re, shutil, stat, subprocess, tempfile, time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "setup-git-deploy-key.sh"
@@ -43,22 +46,27 @@ def sandbox(td, origin=HTTPS_ORIGIN, env_line=None):
     return edge, home
 
 
-def run(edge, home, extra_env=None, remote_check=False):
+def run(edge, home, extra_env=None, remote_check=False, timeout=None):
     """Run the heal against a sandbox.
 
     The harness must stay offline-safe, so the script's `git ls-remote` probe
-    is suppressed by default; remote_check=True re-enables it for the one case
-    that drives it through a fake ssh.
+    is suppressed by default; remote_check=True re-enables it for the cases
+    that drive it through a fake ssh.
     """
     env = dict(os.environ, EDGE_DIR=str(edge), ADMIN_USER=ME, ADMIN_HOME=str(home))
     env.pop("GIT_DEPLOY_KEY_B64", None)
+    # A GIT_SSH_COMMAND/GIT_SSH in the runner's environment outranks the
+    # core.sshCommand under test, which would route the probe past the fake ssh.
+    env.pop("GIT_SSH_COMMAND", None)
+    env.pop("GIT_SSH", None)
     if remote_check:
         env.pop("GIT_DEPLOY_KEY_NO_REMOTE_CHECK", None)
     else:
         env["GIT_DEPLOY_KEY_NO_REMOTE_CHECK"] = "1"
     if extra_env:
         env.update(extra_env)
-    return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
+    return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True,
+                          text=True, timeout=timeout)
 
 
 def git_cfg(edge, key):
@@ -233,6 +241,10 @@ for var in ("DEPLOY_KEY", "DEPLOY_KNOWN_HOSTS"):
     assert vm, f"no {var}= in bootstrap.sh"
     literal = literal.replace("${%s}" % var, vm.group(1))
 assert literal == expected_sshcmd("/home/admin"), (literal, expected_sshcmd("/home/admin"))
+# ...and the README's hand-build clone must carry the same string verbatim, or
+# a hand-built Pi gets core.sshCommand rewritten on its first update.
+readme = (REPO / "README.md").read_text()
+assert expected_sshcmd("/home/admin") in readme, "README.md clone -c core.sshCommand drifted"
 
 # 17. legacy full-account PRIVATE key with no .pub alongside it: still reported
 with tempfile.TemporaryDirectory() as td:
@@ -245,5 +257,35 @@ with tempfile.TemporaryDirectory() as td:
     assert r.returncode == 0, r.stderr
     assert "legacy key still present" in r.stdout and "SHA256:" in r.stdout, r.stdout
     assert (sshdir / "id_ed25519").exists()
+
+# 18. bad GIT_DEPLOY_KEY_B64 while a VALID key is already on disk: keep the
+#     on-disk key, warn, still wire the repo. A typo in .env must not strand a
+#     working Pi -- aborting here would leave origin on https:// forever.
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, env_line="GIT_DEPLOY_KEY_B64=bm90LWEta2V5")  # "not-a-key"
+    sshdir = home / ".ssh"; sshdir.mkdir(mode=0o700)
+    key = sshdir / "id_d2edge_deploy"
+    key.write_text(FAKE_KEY); os.chmod(key, 0o600)
+    r = run(edge, home)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "keeping the existing valid" in r.stdout, (r.stdout, r.stderr)
+    assert key.read_text() == FAKE_KEY, "existing valid key was clobbered"
+    assert git_cfg(edge, "remote.origin.url") == SSH_ORIGIN
+
+# 19. probe timeout: a dead WAN (fake ssh that just hangs) must not stall the
+#     update for the SSH connect timeout -- `timeout 20` bounds the probe, then
+#     the same WARNING fires. The wall-clock bound IS the assertion.
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, env_line=f"GIT_DEPLOY_KEY_B64={FAKE_B64}")
+    bindir = pathlib.Path(td, "bin"); bindir.mkdir()
+    fake_ssh = bindir / "ssh"
+    fake_ssh.write_text("#!/bin/sh\nsleep 60\n"); os.chmod(fake_ssh, 0o755)
+    t0 = time.monotonic()
+    r = run(edge, home, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"},
+            remote_check=True, timeout=90)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 40, f"probe was not bounded: {elapsed:.1f}s"
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "ls-remote origin' failed" in r.stdout, r.stdout
 
 print("ok")
