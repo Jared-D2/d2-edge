@@ -6,9 +6,9 @@ MSP edge stack for customer sites. Runs on Raspberry Pi 5.
 
 | Service | Purpose | LAN Port |
 |---|---|---|
-| tailscale | Secure tunnel to Azure | � |
+| tailscale | Secure tunnel to Azure | — |
 | syslog-proxy | Forwards syslog to Graylog | UDP/TCP 514 |
-| zabbix-proxy | Monitoring proxy | � |
+| zabbix-proxy | Monitoring proxy | — |
 | freeradius-proxy | RADIUS proxy | UDP 1812/1813 |
 | auvik | Network discovery | — |
 | d2-agent | Network test agent | TCP 8080, TCP 5201 (iperf3) |
@@ -20,12 +20,28 @@ MSP edge stack for customer sites. Runs on Raspberry Pi 5.
 - Fresh Raspberry Pi OS Lite 64-bit
 - SSH access
 
-### Step 1 � Bootstrap
+### Step 1 — Bootstrap
+The repo is private. Open the onboarding portal → **New Edge Pi** tab, fill in the
+site, and paste the generated **bootstrap block** into the Pi's shell. It installs the
+fleet read-only deploy key, pins github.com, clones `/opt/d2-edge` as `admin`, then runs
+`shared/scripts/bootstrap.sh`.
+
+Hand-building without the portal: the repo is private, so there is no way to fetch
+`bootstrap.sh` anonymously. Create the files the clone reads, paste in their contents,
+then clone — same steps the portal block performs:
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/Jared-D2/d2-edge/main/shared/scripts/bootstrap.sh | sudo bash
+sudo install -d -m 700 -o admin -g admin /home/admin/.ssh
+sudo install -m 600 -o admin -g admin /dev/null /home/admin/.ssh/id_d2edge_deploy   # then paste the key into it
+sudo install -m 644 -o admin -g admin /dev/null /home/admin/.ssh/known_hosts_github  # then paste GitHub's host keys (gh api meta --jq '.ssh_keys[] | "github.com " + .')
+sudo install -d -m 755 -o admin -g admin /opt/d2-edge
+sudo -u admin git clone \
+    -c core.sshCommand="ssh -i '/home/admin/.ssh/id_d2edge_deploy' -o IdentitiesOnly=yes -o UserKnownHostsFile='/home/admin/.ssh/known_hosts_github' -o StrictHostKeyChecking=yes -o BatchMode=yes" \
+    git@github.com:Jared-D2/d2-edge.git /opt/d2-edge
+sudo bash /opt/d2-edge/shared/scripts/bootstrap.sh
 ```
 
-### Step 2 � Configure
+### Step 2 — Configure
 ```bash
 nano /opt/d2-edge/.env
 ```
@@ -40,9 +56,9 @@ nano /opt/d2-edge/.env
 | RADIUS_SHARED_SECRET | RADIUS proxy secret | (generate randomly) |
 | LOCAL_CLIENT_SECRET | LAN RADIUS client secret | (generate randomly) |
 | LOCAL_CLIENT_SUBNET | Customer LAN subnet | 10.0.0.0/8 |
-| AUVIK_API_KEY | From Auvik portal | � |
+| AUVIK_API_KEY | From Auvik portal | — |
 
-### Step 3 � Deploy
+### Step 3 — Deploy
 ```bash
 sudo bash /opt/d2-edge/shared/scripts/deploy-all.sh
 ```
