@@ -437,9 +437,9 @@ GIT_DEPLOY_KEY_B64=
 - [ ] **Step 3: Syntax-check and confirm preflight is untouched** 🤖
 
 ```bash
-bash -n shared/scripts/update.sh && grep -c "setup-git-deploy-key" shared/scripts/update.sh && grep -c GIT_DEPLOY_KEY_B64 shared/scripts/preflight.sh
+bash -n shared/scripts/update.sh && grep -c "setup-git-deploy-key" shared/scripts/update.sh; grep -c GIT_DEPLOY_KEY_B64 shared/scripts/preflight.sh || true
 ```
-Expected: `1` then `0` (the key is deliberately NOT in preflight's `required=` list — the key file path is an equally valid source, and pre-flip Pis must keep deploying).
+Expected: `2` (the `-x` test line and the `bash` call line) then `0` (the key is deliberately NOT in preflight's `required=` list — the key file path is an equally valid source, and pre-flip Pis must keep deploying).
 
 - [ ] **Step 4: Commit** 🤖
 
