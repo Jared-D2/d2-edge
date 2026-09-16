@@ -32,7 +32,10 @@ fi
 # state. Different-value duplicates are left for preflight to flag —
 # silent collapse there could lose operator intent.
 if [[ -f "$EDGE_DIR/.env" ]]; then
-    awk -F= '
+    # umask 077 in a subshell: .env now carries a fleet credential
+    # (GIT_DEPLOY_KEY_B64), so the temp must never exist world-readable. The
+    # chown/chmod --reference below still converges it onto .env's own mode.
+    ( umask 077; awk -F= '
         /^[[:space:]]*#/ || /^[[:space:]]*$/ { print; next }
         /^[A-Za-z_][A-Za-z0-9_]*=/ {
             k=$1
@@ -44,7 +47,7 @@ if [[ -f "$EDGE_DIR/.env" ]]; then
             seen[k]=v
         }
         { print }
-    ' "$EDGE_DIR/.env" > "$EDGE_DIR/.env.dedup.$$"
+    ' "$EDGE_DIR/.env" > "$EDGE_DIR/.env.dedup.$$" )
     if ! cmp -s "$EDGE_DIR/.env" "$EDGE_DIR/.env.dedup.$$"; then
         chown --reference="$EDGE_DIR/.env" "$EDGE_DIR/.env.dedup.$$"
         chmod --reference="$EDGE_DIR/.env" "$EDGE_DIR/.env.dedup.$$"
@@ -79,6 +82,18 @@ sudo -u admin git ls-files -z | xargs -0r -I{} chown admin:admin "$EDGE_DIR/{}" 
 # play should pre-chown tracked dirs before the first post-OOB update wave.
 sudo -u admin git ls-files | xargs -rn1 dirname | sort -u \
     | while read -r d; do chown admin:admin "$EDGE_DIR/$d" 2>/dev/null || true; done
+# Private-repo git auth, BEFORE the pull it protects: installs the fleet
+# READ-ONLY deploy key from GIT_DEPLOY_KEY_B64 (.env), pins GitHub host keys,
+# and switches origin https:// -> SSH + core.sshCommand. Running here (not in
+# the [3/6] heals) means a Pi whose wiring drifted self-repairs on THIS run
+# instead of dying at the pull with no scripted way back (svc_ansible can only
+# run update.sh). Self-mod lag still applies: the first update.sh after this
+# landed pulls the code with the OLD body, the SECOND runs this -- so the
+# fleet converts (two pushes) BEFORE the repo flips private. Fail-loud on
+# purpose (no || true): a bad key value would break the pull anyway.
+if [[ -x "$EDGE_DIR/scripts/setup-git-deploy-key.sh" ]]; then
+    bash "$EDGE_DIR/scripts/setup-git-deploy-key.sh"
+fi
 sudo -u admin git pull
 # Stamp current commit into .env so d2-agent reports the running version.
 SHA=$(sudo -u admin git -C "$EDGE_DIR" rev-parse HEAD)
@@ -191,17 +206,6 @@ fi
 # setup -- mirrors the auvik-watchdog / oxidized-proxy heals above.
 if [[ -x "$EDGE_DIR/scripts/setup-svc-ansible.sh" ]]; then
     bash "$EDGE_DIR/scripts/setup-svc-ansible.sh"
-fi
-# Private-repo git auth: installs the fleet READ-ONLY deploy key from
-# GIT_DEPLOY_KEY_B64 (.env) and switches origin https:// -> SSH with pinned
-# GitHub host keys. Self-mod lag applies: the first update.sh after this
-# landed pulls the code, the SECOND executes this hook -- so the fleet must
-# convert (two pushes) BEFORE the repo flips private, because the [1/6]
-# pull above is what breaks on an unconverted https:// Pi. On such a Pi
-# with no key this only warns. Fail-loud on purpose (no || true): a bad
-# key value means the next pull would fail anyway.
-if [[ -x "$EDGE_DIR/scripts/setup-git-deploy-key.sh" ]]; then
-    bash "$EDGE_DIR/scripts/setup-git-deploy-key.sh"
 fi
 # Wazuh agent: idempotent, FAIL-SOFT install + enrolment of the native Wazuh
 # agent for host security monitoring (package/CVE inventory, FIM, auditd).
