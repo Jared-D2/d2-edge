@@ -4,10 +4,11 @@
 Linux only (install -o, git, base64). Run on the Ansible control node:
     python3 tests/test_setup_git_deploy_key.py
 """
-import atexit, base64, os, pathlib, pwd, shutil, stat, subprocess, tempfile
+import atexit, base64, os, pathlib, pwd, re, shutil, stat, subprocess, tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "setup-git-deploy-key.sh"
+BOOTSTRAP = REPO / "shared" / "scripts" / "bootstrap.sh"
 ME = pwd.getpwuid(os.getuid()).pw_name
 
 # The script validates the key with `ssh-keygen -y`, so the fixture must be a
@@ -42,9 +43,19 @@ def sandbox(td, origin=HTTPS_ORIGIN, env_line=None):
     return edge, home
 
 
-def run(edge, home, extra_env=None):
+def run(edge, home, extra_env=None, remote_check=False):
+    """Run the heal against a sandbox.
+
+    The harness must stay offline-safe, so the script's `git ls-remote` probe
+    is suppressed by default; remote_check=True re-enables it for the one case
+    that drives it through a fake ssh.
+    """
     env = dict(os.environ, EDGE_DIR=str(edge), ADMIN_USER=ME, ADMIN_HOME=str(home))
     env.pop("GIT_DEPLOY_KEY_B64", None)
+    if remote_check:
+        env.pop("GIT_DEPLOY_KEY_NO_REMOTE_CHECK", None)
+    else:
+        env["GIT_DEPLOY_KEY_NO_REMOTE_CHECK"] = "1"
     if extra_env:
         env.update(extra_env)
     return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
@@ -184,5 +195,55 @@ with tempfile.TemporaryDirectory() as td:
     assert "ERROR" in r.stderr, r.stderr
     assert not home.exists()
     assert git_cfg(edge, "remote.origin.url") == HTTPS_ORIGIN
+
+# 14. reachability probe ON: a failing ssh makes `git ls-remote` fail -> WARNING,
+#     still exit 0. A fake ssh on PATH (git resolves core.sshCommand's `ssh`
+#     through PATH) keeps this deterministic and offline.
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, env_line=f"GIT_DEPLOY_KEY_B64={FAKE_B64}")
+    bindir = pathlib.Path(td, "bin"); bindir.mkdir()
+    fake_ssh = bindir / "ssh"
+    fake_ssh.write_text("#!/bin/sh\nexit 255\n"); os.chmod(fake_ssh, 0o755)
+    r = run(edge, home, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"},
+            remote_check=True)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "ls-remote origin' failed" in r.stdout, r.stdout
+    assert git_cfg(edge, "remote.origin.url") == SSH_ORIGIN
+
+# 15. pre-existing key file that is NOT a usable private key, no .env value:
+#     warn that the next pull will fail, but still exit 0 (operator fixes .env)
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td)
+    sshdir = home / ".ssh"; sshdir.mkdir(mode=0o700)
+    key = sshdir / "id_d2edge_deploy"
+    key.write_text("garbage"); os.chmod(key, 0o600)
+    r = run(edge, home)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "does not parse" in r.stdout, r.stdout
+    assert key.read_text() == "garbage"
+
+# 16. parity: bootstrap.sh's clone -c core.sshCommand must equal the heal's
+#     wanted string, or every bootstrapped Pi gets it rewritten on first update
+bs = BOOTSTRAP.read_text()
+m = re.search(r'-c core\.sshCommand="([^"]*)"', bs)
+assert m, "no -c core.sshCommand= literal in bootstrap.sh"
+literal = m.group(1)
+for var in ("DEPLOY_KEY", "DEPLOY_KNOWN_HOSTS"):
+    vm = re.search(rf'^{var}=(\S+)$', bs, re.M)
+    assert vm, f"no {var}= in bootstrap.sh"
+    literal = literal.replace("${%s}" % var, vm.group(1))
+assert literal == expected_sshcmd("/home/admin"), (literal, expected_sshcmd("/home/admin"))
+
+# 17. legacy full-account PRIVATE key with no .pub alongside it: still reported
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, env_line=f"GIT_DEPLOY_KEY_B64={FAKE_B64}")
+    sshdir = home / ".ssh"; sshdir.mkdir(mode=0o700)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "legacy",
+                    "-f", str(sshdir / "id_ed25519")], check=True)
+    (sshdir / "id_ed25519.pub").unlink()
+    r = run(edge, home)
+    assert r.returncode == 0, r.stderr
+    assert "legacy key still present" in r.stdout and "SHA256:" in r.stdout, r.stdout
+    assert (sshdir / "id_ed25519").exists()
 
 print("ok")

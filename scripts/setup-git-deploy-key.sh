@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Point this Pi's /opt/d2-edge checkout at the PRIVATE GitHub repo using the
-# fleet READ-ONLY deploy key. Idempotent -- runs on every update.sh (host-
-# heal [3/6]) and at the end of bootstrap.sh.
+# fleet READ-ONLY deploy key. Idempotent -- runs on every update.sh ([1/6],
+# before the pull) and at the end of bootstrap.sh.
 #
 # Why: the d2-edge repo is private; anonymous https:// pulls 404. Every Pi
 # needs (a) the deploy key and (b) an SSH origin. The key is fleet-shared
@@ -81,15 +81,20 @@ else
     install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$SSH_DIR"
 fi
 
-# Stage inside $SSH_DIR (0700, same filesystem as the destinations).
+# Stage inside $SSH_DIR (0700, same filesystem as the destinations). Sweep
+# temps a killed earlier run left behind before making a new one.
+rm -f "$SSH_DIR"/.setup-git-deploy-key.* 2>/dev/null || true
 tmp=$(mktemp "$SSH_DIR/.setup-git-deploy-key.XXXXXX"); trap 'rm -f "$tmp"' EXIT
 
 if [[ -e "$ENV_FILE" && ! -r "$ENV_FILE" ]]; then
     log "NOTE: $ENV_FILE exists but is not readable as $(id -un); run as root"
 fi
 
-# 1. Key material: environment wins (bootstrap, pre-.env), then .env.
-key_b64="${GIT_DEPLOY_KEY_B64:-$(env_get GIT_DEPLOY_KEY_B64 "$ENV_FILE")}"
+# 1. Key material: environment wins (bootstrap, pre-.env), then .env. The
+# `|| true` keeps an unreadable .env (running as a non-root operator) on the
+# NOTE + WARNING path above instead of aborting on sed's "Permission denied".
+key_material=
+key_b64="${GIT_DEPLOY_KEY_B64:-$(env_get GIT_DEPLOY_KEY_B64 "$ENV_FILE" || true)}"
 if [[ -n "$key_b64" ]]; then
     # ssh-keygen -y proves it parses AND is unencrypted (and catches truncation);
     # a BEGIN-line grep passes on a half-written key. $tmp is mktemp'd 0600.
@@ -99,6 +104,7 @@ if [[ -n "$key_b64" ]]; then
         exit 1
     fi
     if install_file 600 "$tmp" "$KEY_FILE"; then log "installed $KEY_FILE"; fi
+    key_material=1
 fi
 
 # 2. Without a key there is nothing to wire -- but shout if the pull will break.
@@ -108,6 +114,14 @@ if [[ ! -f "$KEY_FILE" ]]; then
         log "WARNING: origin is https:// and no deploy key is configured -- git pull fails once the repo is private. Add GIT_DEPLOY_KEY_B64 to $ENV_FILE."
     fi
     exit 0
+fi
+
+# 2b. Key file on disk but no validated material this run (nothing in the
+# environment or .env): prove what is already there is usable, or the failure
+# only shows up as an unexplained pull error. Warning, not fatal -- the fix is
+# an operator putting GIT_DEPLOY_KEY_B64 back in .env.
+if [[ -z "$key_material" ]] && ! ssh-keygen -y -P '' -f "$KEY_FILE" >/dev/null 2>&1; then
+    log "WARNING: $KEY_FILE does not parse as an unencrypted OpenSSH private key -- the next pull will fail"
 fi
 
 # 3. Pinned GitHub host keys.
@@ -131,9 +145,22 @@ if [[ -d "$EDGE_DIR/.git" ]]; then
         fi
         log "origin: ${origin:-<none>} -> $SSH_ORIGIN"
     fi
+    # Prove the wiring end-to-end so a dead key shows up in THIS run's output,
+    # not one update later. BatchMode=yes means it cannot hang. Skippable for
+    # the offline test harness only.
+    if [[ -z "${GIT_DEPLOY_KEY_NO_REMOTE_CHECK:-}" ]] \
+       && ! as_admin git -C "$EDGE_DIR" ls-remote --exit-code origin HEAD >/dev/null 2>&1; then
+        log "WARNING: origin is wired to the deploy key but 'git ls-remote origin' failed -- check WAN, the key on GitHub, and the pinned host keys"
+    fi
 fi
 
-# 5. Legacy full-account key: report, never delete.
-if [[ -f "$SSH_DIR/id_ed25519.pub" ]]; then
-    log "NOTICE: legacy key still present: $(ssh-keygen -lf "$SSH_DIR/id_ed25519.pub" 2>/dev/null || echo "$SSH_DIR/id_ed25519.pub") -- revoke on GitHub once the fleet is converted, then delete it"
+# 5. Legacy full-account key: report, never delete. Either half is evidence --
+# an imaged Pi whose .pub was tidied away still has the private key on disk,
+# and `ssh-keygen -lf` fingerprints a private key too.
+legacy_key=""
+for f in "$SSH_DIR/id_ed25519.pub" "$SSH_DIR/id_ed25519"; do
+    if [[ -f "$f" ]]; then legacy_key="$f"; break; fi
+done
+if [[ -n "$legacy_key" ]]; then
+    log "NOTICE: legacy key still present: $(ssh-keygen -lf "$legacy_key" 2>/dev/null || echo "$legacy_key") -- revoke on GitHub once the fleet is converted, then delete it"
 fi
