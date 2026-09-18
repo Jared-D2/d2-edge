@@ -5,11 +5,12 @@
 # repo-exists branch, and again after the fresh clone.
 #
 # Why: the d2-edge repo is private; anonymous https:// pulls 404. Every Pi
-# needs (a) the deploy key and (b) an SSH origin. The key is fleet-shared
-# (one read-only deploy key on the repo -- same pattern as TS_AUTHKEY and
-# AGENT_TOKEN) and arrives as GIT_DEPLOY_KEY_B64 in .env (root-only 0600),
-# or as the same name in the ENVIRONMENT, which is how bootstrap supplies it
-# before .env exists. Environment wins over .env.
+# needs (a) the deploy key and (b) an SSH origin -- on port 443
+# (ssh.github.com), because customer firewalls block outbound 22. The key is
+# fleet-shared (one read-only deploy key on the repo -- same pattern as
+# TS_AUTHKEY and AGENT_TOKEN) and arrives as GIT_DEPLOY_KEY_B64 in .env
+# (root-only 0600), or as the same name in the ENVIRONMENT, which is how
+# bootstrap supplies it before .env exists. Environment wins over .env.
 #
 # Never touches the operator's legacy ~admin/.ssh/id_ed25519 (the full-
 # account key from imaging) -- it only REPORTS its fingerprint so the key
@@ -27,16 +28,20 @@ ADMIN_HOME="${ADMIN_HOME:-/home/$ADMIN_USER}"
 SSH_DIR="$ADMIN_HOME/.ssh"
 KEY_FILE="$SSH_DIR/id_d2edge_deploy"
 KNOWN_HOSTS="$SSH_DIR/known_hosts_github"
-SSH_ORIGIN="git@github.com:Jared-D2/d2-edge.git"
+# SSH over 443 at ssh.github.com: customer firewalls block outbound 22 (lmc001 hung 16 min on 2026-09-18); 443 works wherever https does. Same host keys as github.com.
+SSH_ORIGIN="ssh://git@ssh.github.com:443/Jared-D2/d2-edge.git"
 # Keep identical to the clone -c core.sshCommand in shared/scripts/bootstrap.sh and the portal's edge_bootstrap.py; drift just makes this heal re-log once, but keep them in step.
-SSH_CMD="ssh -i '$KEY_FILE' -o IdentitiesOnly=yes -o UserKnownHostsFile='$KNOWN_HOSTS' -o StrictHostKeyChecking=yes -o BatchMode=yes"
+SSH_CMD="ssh -i '$KEY_FILE' -o IdentitiesOnly=yes -o UserKnownHostsFile='$KNOWN_HOSTS' -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20"
 
-# GitHub's published host keys (gh api meta --jq '.ssh_keys[]', 2026-09-14).
+# GitHub's published host keys (gh api meta --jq '.ssh_keys[]', 2026-09-14),
+# under the bracketed [host]:port form known_hosts requires for a non-22 port.
+# ssh.github.com serves the SAME keys as github.com, so the key material is
+# byte-identical to the published values -- only the host field differs.
 # Pinned, NOT ssh-keyscan'd: trust-on-first-use over a customer WAN is not
 # acceptable for the key that pulls code onto every appliance.
-GITHUB_HOST_KEYS='github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
-github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
-github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk='
+GITHUB_HOST_KEYS='[ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+[ssh.github.com]:443 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+[ssh.github.com]:443 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk='
 
 # shellcheck source=../shared/scripts/lib/envfile.sh
 . "$SCRIPT_DIR/../shared/scripts/lib/envfile.sh"

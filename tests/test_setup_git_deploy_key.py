@@ -24,7 +24,10 @@ FAKE_KEY = pathlib.Path(_KEYDIR, "id_fixture").read_text()
 FAKE_B64 = base64.b64encode(FAKE_KEY.encode()).decode()
 # Same key, last 40 chars lopped off: decodes cleanly, parses as nothing.
 BAD_KEY_B64 = base64.b64encode(FAKE_KEY[:-40].encode()).decode()
-SSH_ORIGIN = "git@github.com:Jared-D2/d2-edge.git"
+SSH_ORIGIN = "ssh://git@ssh.github.com:443/Jared-D2/d2-edge.git"
+# The pre-443 SSH origin (port 22). Still on Pis that converted before the
+# switch to ssh.github.com:443; the heal must rewrite it like any other.
+LEGACY_SSH_ORIGIN = "git@github.com:Jared-D2/d2-edge.git"
 HTTPS_ORIGIN = "https://github.com/Jared-D2/d2-edge.git"
 KEY_ERR = "not a base64 OpenSSH private key"
 
@@ -32,7 +35,8 @@ KEY_ERR = "not a base64 OpenSSH private key"
 def expected_sshcmd(home):
     return (f"ssh -i '{home}/.ssh/id_d2edge_deploy' -o IdentitiesOnly=yes"
             f" -o UserKnownHostsFile='{home}/.ssh/known_hosts_github'"
-            f" -o StrictHostKeyChecking=yes -o BatchMode=yes")
+            f" -o StrictHostKeyChecking=yes -o BatchMode=yes"
+            f" -o ConnectTimeout=20")
 
 
 def sandbox(td, origin=HTTPS_ORIGIN, env_line=None):
@@ -84,7 +88,7 @@ with tempfile.TemporaryDirectory() as td:
     assert key.read_text() == FAKE_KEY
     assert stat.S_IMODE(key.stat().st_mode) == 0o600
     assert stat.S_IMODE((home / ".ssh").stat().st_mode) == 0o700
-    assert "github.com ssh-ed25519" in (home / ".ssh" / "known_hosts_github").read_text()
+    assert "[ssh.github.com]:443 ssh-ed25519" in (home / ".ssh" / "known_hosts_github").read_text()
     assert git_cfg(edge, "remote.origin.url") == SSH_ORIGIN
     sshcmd = git_cfg(edge, "core.sshCommand")
     assert "IdentitiesOnly=yes" in sshcmd and str(key) in sshcmd and "StrictHostKeyChecking=yes" in sshcmd
@@ -106,7 +110,8 @@ with tempfile.TemporaryDirectory() as td:
     assert (home / ".ssh" / "id_d2edge_deploy").read_text() == FAKE_KEY
     assert git_cfg(edge, "remote.origin.url") == SSH_ORIGIN
 
-# 3. already-SSH origin, no key anywhere: exit 0, no warning, origin untouched
+# 3. already-converted origin (443 form), no key anywhere: exit 0, no warning,
+#    origin untouched
 with tempfile.TemporaryDirectory() as td:
     edge, home = sandbox(td, origin=SSH_ORIGIN)
     r = run(edge, home)
@@ -287,5 +292,25 @@ with tempfile.TemporaryDirectory() as td:
     assert elapsed < 40, f"probe was not bounded: {elapsed:.1f}s"
     assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
     assert "ls-remote origin' failed" in r.stdout, r.stdout
+
+# 20. legacy port-22 SSH origin + key: rewritten to the 443 form, and the log
+#     line names both ends so the rollout is auditable from update.sh output.
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, origin=LEGACY_SSH_ORIGIN,
+                         env_line=f"GIT_DEPLOY_KEY_B64={FAKE_B64}")
+    r = run(edge, home)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert git_cfg(edge, "remote.origin.url") == SSH_ORIGIN, git_cfg(edge, "remote.origin.url")
+    assert f"origin: {LEGACY_SSH_ORIGIN} -> {SSH_ORIGIN}" in r.stdout, r.stdout
+
+# 21. legacy port-22 SSH origin, NO key anywhere: exit 0 and NO warning. The
+#     https:// warning is about a Pi that cannot authenticate at all; a port-22
+#     Pi still pulls via the operator's legacy account key until it is revoked.
+with tempfile.TemporaryDirectory() as td:
+    edge, home = sandbox(td, origin=LEGACY_SSH_ORIGIN)
+    r = run(edge, home)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "WARNING" not in r.stdout, r.stdout
+    assert git_cfg(edge, "remote.origin.url") == LEGACY_SSH_ORIGIN
 
 print("ok")

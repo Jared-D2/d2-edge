@@ -4,7 +4,8 @@ set -euo pipefail
 # The repo is PRIVATE. Clones/pulls authenticate with the fleet read-only
 # deploy key; the onboarding portal's "New Edge Pi" block installs the key
 # and the pinned GitHub host keys and clones BEFORE running this script.
-REPO_GIT="git@github.com:Jared-D2/d2-edge.git"
+# SSH on port 443 (ssh.github.com): customer firewalls block outbound 22 -- same host keys as github.com.
+REPO_GIT="ssh://git@ssh.github.com:443/Jared-D2/d2-edge.git"
 DEPLOY_KEY=/home/admin/.ssh/id_d2edge_deploy
 DEPLOY_KNOWN_HOSTS=/home/admin/.ssh/known_hosts_github
 EDGE_DIR="/opt/d2-edge"
@@ -221,7 +222,7 @@ else
     install -d -m 755 -o admin -g admin "${EDGE_DIR}"
     # Keep identical to SSH_CMD in scripts/setup-git-deploy-key.sh.
     sudo -u admin git clone \
-        -c core.sshCommand="ssh -i '${DEPLOY_KEY}' -o IdentitiesOnly=yes -o UserKnownHostsFile='${DEPLOY_KNOWN_HOSTS}' -o StrictHostKeyChecking=yes -o BatchMode=yes" \
+        -c core.sshCommand="ssh -i '${DEPLOY_KEY}' -o IdentitiesOnly=yes -o UserKnownHostsFile='${DEPLOY_KNOWN_HOSTS}' -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20" \
         "${REPO_GIT}" "${EDGE_DIR}"
 fi
 
