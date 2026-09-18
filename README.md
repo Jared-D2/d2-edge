@@ -33,11 +33,11 @@ then clone — same steps the portal block performs:
 ```bash
 sudo install -d -m 700 -o admin -g admin /home/admin/.ssh
 sudo install -m 600 -o admin -g admin /dev/null /home/admin/.ssh/id_d2edge_deploy   # then paste the key into it
-sudo install -m 644 -o admin -g admin /dev/null /home/admin/.ssh/known_hosts_github  # then paste GitHub's host keys (gh api meta --jq '.ssh_keys[] | "github.com " + .')
+sudo install -m 644 -o admin -g admin /dev/null /home/admin/.ssh/known_hosts_github  # then paste GitHub's host keys (gh api meta --jq '.ssh_keys[] | "[ssh.github.com]:443 " + .')
 sudo install -d -m 755 -o admin -g admin /opt/d2-edge
 sudo -u admin git clone \
-    -c core.sshCommand="ssh -i '/home/admin/.ssh/id_d2edge_deploy' -o IdentitiesOnly=yes -o UserKnownHostsFile='/home/admin/.ssh/known_hosts_github' -o StrictHostKeyChecking=yes -o BatchMode=yes" \
-    git@github.com:Jared-D2/d2-edge.git /opt/d2-edge
+    -c core.sshCommand="ssh -i '/home/admin/.ssh/id_d2edge_deploy' -o IdentitiesOnly=yes -o UserKnownHostsFile='/home/admin/.ssh/known_hosts_github' -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20" \
+    ssh://git@ssh.github.com:443/Jared-D2/d2-edge.git /opt/d2-edge
 sudo bash /opt/d2-edge/shared/scripts/bootstrap.sh
 ```
 

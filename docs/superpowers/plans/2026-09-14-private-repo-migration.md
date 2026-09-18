@@ -990,7 +990,7 @@ sudo install -d -m 700 -o admin -g admin /home/admin/.ssh
 sudo install -m 600 -o admin -g admin /dev/null /home/admin/.ssh/id_d2edge_deploy
 echo '<value>' | base64 -d | sudo tee /home/admin/.ssh/id_d2edge_deploy >/dev/null
 sudo install -m 644 -o admin -g admin /dev/null /home/admin/.ssh/known_hosts_github
-gh api meta --jq '.ssh_keys[] | "github.com " + .' | sudo tee /home/admin/.ssh/known_hosts_github >/dev/null   # run `gh api` on the laptop and paste the 3 lines if the Pi has no gh
+gh api meta --jq '.ssh_keys[] | "[ssh.github.com]:443 " + .' | sudo tee /home/admin/.ssh/known_hosts_github >/dev/null   # run `gh api` on the laptop and paste the 3 lines if the Pi has no gh
 sudo -u admin git -C /opt/d2-edge remote set-url origin git@github.com:Jared-D2/d2-edge.git
 sudo -u admin git -C /opt/d2-edge config core.sshCommand "ssh -i '/home/admin/.ssh/id_d2edge_deploy' -o IdentitiesOnly=yes -o UserKnownHostsFile='/home/admin/.ssh/known_hosts_github' -o StrictHostKeyChecking=yes -o BatchMode=yes"
 sudo bash /opt/d2-edge/shared/scripts/update.sh && sudo bash /opt/d2-edge/shared/scripts/update.sh
@@ -1020,12 +1020,18 @@ Update `reference_d2_edge_stack.md` (Repo section: private, deploy key path, boo
 
 ---
 
+## Rollout finding 2026-09-18: SSH port 22 blocked at customer sites → SSH over 443
+
+lmc001-hq-pi01's second update hung 16 minutes at the pull: TCP/22 to GitHub opens but the SSH banner exchange never completes (site firewall). https/443 works everywhere the fleet lives. **Decision:** the fleet origin is `ssh://git@ssh.github.com:443/Jared-D2/d2-edge.git` (GitHub's SSH-over-443 endpoint; same deploy key, same host keys; known_hosts lines use the `[ssh.github.com]:443 ` prefix) and `SSH_CMD` gains `-o ConnectTimeout=20` (OpenSSH applies it to the banner exchange too). Heal, bootstrap, README, `.env.template`, portal and tests all changed together; the committed files are canonical. Verified from the office Pi with the deploy key: `ssh -p 443 -T git@ssh.github.com` → `Hi Jared-D2/d2-edge!`.
+
+**Recovery trap:** a Pi holding the earlier heal (merge `8876431`) rewrites origin to the port-22 form BEFORE it pulls, so it can never fetch this fix over a blocked port 22. While the repo is still public, run once on such a Pi as admin: `sudo -u admin git -C /opt/d2-edge pull https://github.com/Jared-D2/d2-edge.git main` — then the next `update.sh` converts straight to 443. Needed on lmc001 (blocked), and done on hom001 + ncm001 too (they hold `8876431` and a valid key; no reason to gamble on 22). Pis still at `2471ace` (no heal on disk) go https → 443 with a plain two-run push. Note `deploy-edge.yml` is `any_errors_fatal`: one bad `.env` paste stops the whole play, so run per-Pi target lists.
+
 ## Runbook: GitHub host-key rotation (added after review, 2026-09-15)
 
 Every Pi pins GitHub's three published host keys in `/home/admin/.ssh/known_hosts_github` with `StrictHostKeyChecking=yes`. If GitHub rotates a key (it did in March 2023), every `git pull` fails with `HOST KEY VERIFICATION FAILED`, and the corrected pin ships in the repo the Pis can no longer pull. Recovery is out-of-band, per Pi, as `admin` (Claude: D2 Pis only; Jared: customer Pis):
 
 ```bash
-gh api meta --jq '.ssh_keys[] | "github.com " + .' > /tmp/known_hosts_github   # on the laptop
+gh api meta --jq '.ssh_keys[] | "[ssh.github.com]:443 " + .' > /tmp/known_hosts_github   # on the laptop
 scp /tmp/known_hosts_github admin@<pi>:/home/admin/.ssh/known_hosts_github      # per Pi
 ```
 then `d2-deploy push <target>` twice (the heal re-pins from the repo copy on the second run). Update `GITHUB_HOST_KEYS` in `scripts/setup-git-deploy-key.sh` and `GITHUB_ED25519_HOST_KEY` in the portal's `edge_bootstrap.py` in the same change.
