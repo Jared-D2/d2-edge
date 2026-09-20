@@ -201,6 +201,21 @@ fi
 if [[ -x "$EDGE_DIR/scripts/install-tailscale-watchdog.sh" ]]; then
     bash "$EDGE_DIR/scripts/install-tailscale-watchdog.sh"
 fi
+# Persistent journal: Raspberry Pi OS ships Storage=volatile, so the kernel/
+# NM/watchdog lines that explain a fault die with the reboot that fixes it
+# (lmc001-hq-pi01 2026-09-19: 26 h eth0 tx-stall, zero on-box evidence).
+# Capped at 200M. Runs before the watchdogs so their first lines persist.
+if [[ -x "$EDGE_DIR/scripts/install-persistent-journal.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-persistent-journal.sh" || true
+fi
+# LAN path watchdog: bounces the wired NIC, then (rate-limited) reboots, when
+# the default gateway stops resolving at L2 — the state the tailscale-watchdog
+# deliberately ignores ("control plane unreachable, holding off"). Judges by
+# ARP/neighbour state, never ICMP (customer gateways drop ping). Gated by
+# DEPLOY_LAN_WATCHDOG (default enabled); see scripts/lan-watchdog.sh.
+if [[ -x "$EDGE_DIR/scripts/install-lan-watchdog.sh" ]]; then
+    bash "$EDGE_DIR/scripts/install-lan-watchdog.sh" || true
+fi
 
 # Ansible service account: idempotent provision of svc_ansible (sudo limited
 # to THIS update.sh, key locked to the Ansible control node 192.168.166.3).

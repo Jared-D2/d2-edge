@@ -68,6 +68,25 @@ sudo bash /opt/d2-edge/shared/scripts/deploy-all.sh
 sudo bash /opt/d2-edge/shared/scripts/update.sh
 ```
 
+## Host self-healing (installed by update.sh)
+
+| Timer | Watches | Action |
+|---|---|---|
+| `tailscale-watchdog` (5 min) | tailscaled wedged while the control plane is reachable | restart the tailscale container |
+| `lan-watchdog` (1 min) | wired default gateway stops answering ARP (NIC tx-stall, lost lease, dead upstream) | bounce `eth0`, then a rate-limited reboot — never reboots if the cable was already unplugged |
+| `auvik-watchdog` (5 min) | Auvik tenant-secret corruption | `auvik-recover.sh` |
+
+The journal is persistent (200 MB cap), so the previous boot survives a reboot:
+
+```bash
+journalctl -b -1 -t lan-watchdog            # what the watchdog did before the last reboot
+ls /var/lib/d2-lan-watchdog/snapshots/      # link/neigh/ethtool/dmesg captured at first failure
+sudo touch /etc/d2-lan-watchdog.disabled    # pause BEFORE unplugging or re-addressing eth0
+sudo rm /etc/d2-lan-watchdog.disabled       # resume
+```
+
+`DEPLOY_LAN_WATCHDOG=disabled` in `.env` removes the timer on the next update.
+
 ## Useful commands
 ```bash
 # Container status

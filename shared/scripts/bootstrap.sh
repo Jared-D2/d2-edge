@@ -274,6 +274,11 @@ fi
 # and never rotated anything.
 bash "${EDGE_DIR}/scripts/install-syslog-retention.sh"
 
+# ─── Persistent journal + LAN path watchdog ────────────────────────────────
+# Same scripts update.sh runs as host heals; see the [3/6] block there.
+bash "${EDGE_DIR}/scripts/install-persistent-journal.sh" || true
+bash "${EDGE_DIR}/scripts/install-lan-watchdog.sh" || true
+
 # ─── Create required directories ──────────────────────────────────────────
 mkdir -p "${EDGE_DIR}"/{syslog-proxy/{config,logs,state},zabbix-proxy/{config,data,logs},freeradius-proxy/config/{templates,rendered},auvik/{config,etc,logs},d2-agent,shared/scripts}
 
