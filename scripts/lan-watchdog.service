@@ -5,3 +5,6 @@ Description=LAN path watchdog (bounce wired NIC, then reboot, when the gateway s
 Type=oneshot
 ExecStart=/opt/d2-edge/scripts/lan-watchdog.sh
 TimeoutStartSec=120
+# Runs every minute: keep systemd's Starting/Finished chatter (info) out of the
+# persistent journal. The script's own lines are logger's default notice.
+LogLevelMax=notice
