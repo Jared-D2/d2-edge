@@ -19,3 +19,9 @@ fi
 bash /opt/d2-edge/render-configs.sh >/dev/null 2>&1 || true
 docker compose -f /opt/d2-edge/docker-compose.yml up -d --force-recreate freeradius-proxy
 logger -t lego-radsec-deploy "deployed $(basename "$LEGO_CERT_PATH"); re-rendered + recreated freeradius-proxy"
+# Push the new days-left to Zabbix now rather than waiting for the monitor's own
+# daily timer - otherwise a renewal that lands after that day's check leaves a
+# stale expiry alert standing for up to 24h. Never fail the deploy over it: the
+# cert is already installed by this point, and the check exits 1/2 by design on
+# warn/crit (set -e would turn that into a "failed" renewal).
+[ -x /usr/local/sbin/radsec-cert-check ] && /usr/local/sbin/radsec-cert-check >/dev/null 2>&1 || true

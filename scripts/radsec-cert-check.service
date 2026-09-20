@@ -1,5 +1,14 @@
 [Unit]
 Description=Check RadSec cert days-to-expiry; alert via syslog + Zabbix
+# Ordering only (no Wants/Requires) so this stays a plain oneshot when neither
+# unit is queued. Both timers are Persistent=true, so after a long power-off
+# systemd fires both catch-up runs at boot in the same transaction - without
+# this the check can read the cert BEFORE lego renews it and push a stale
+# "expired" value that then stands until the next daily run (d2001-jh-pi01
+# 2026-09-20: checked 14:10 -> -11, renewed 14:31, alert stale ~18h).
+# docker.service because the Zabbix push is a docker exec into zabbix-agent2;
+# a boot-time run that beats dockerd pushes nothing (the sender is || true).
+After=lego-radsec.service docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/radsec-cert-check
