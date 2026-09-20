@@ -1,0 +1,7 @@
+[Unit]
+Description=LAN path watchdog (bounce wired NIC, then reboot, when the gateway stops resolving)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/d2-edge/scripts/lan-watchdog.sh
+TimeoutStartSec=120
