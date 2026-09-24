@@ -4,20 +4,82 @@
 # ONLY privileged step is `sudo -n /usr/local/sbin/lego-radsec-enroll.sh` (granted
 # in scripts/setup-svc-ansible.sh). No broad become; .3 never touches the CA.
 #
-# PREREQUISITE -- the GATED step, done OFF .3: the Pi's DNS-01 key must already be
-# registered with acme-hook. The play prints the exact command; a CA admin runs
+# PREREQUISITE 1 -- the GATED step, done OFF .3: the Pi's DNS-01 key must already
+# be registered with acme-hook. The play prints the exact command; a CA admin runs
 # `ansible/register-radsec-pi.sh '<pubkey>'` on ca-dns. A Pi must not be able to
 # authorize itself to the CA, so this is deliberately not automatable from .3.
 #
-# Usage: ansible-playbook -i inventory/netbox.yml ansible/enroll-radsec-pi.yml \
-#          -l <pi> -e zabbix_api_token=<dedicated-token>
+# PREREQUISITE 2 -- Tailscale ACL: the control node needs
+#   {"action":"accept","src":["tag:ansible"],"dst":["10.255.255.4:443"]}
+# The original grant covered only 10.255.255.4:10051 (Zabbix active agent), so
+# every API call from .3 times out. Verified 2026-09-24: route to .4 is via
+# tailscale0, 10051 open, 443 blocked. Without this the play stops at the
+# preflight -- by design, see below.
+#
+# The Zabbix half is MANDATORY, not best-effort: a Pi that holds a cert with no
+# radsec.cert.daysleft item renews blind, and a silent renewal failure then goes
+# unnoticed until RadSec breaks (a ~3-week silent expiry on d2001, 2026-06-26,
+# is exactly what radsec-cert-check exists to prevent). So the API preflight runs
+# BEFORE issuance -- if the token, the ACL or the Zabbix host is missing we stop
+# without having minted a cert we cannot monitor -- and the play verifies the
+# item and both triggers exist before reporting success.
+#
+# Usage -- the token comes from ZBX_TOKEN in the control node's existing
+# /home/svc_ansible/.config/zabbix.env (same pattern as netbox.env), which keeps
+# it out of shell history and `ps`. That file is NOT sourced automatically: the
+# stock .bashrc early-returns for non-interactive shells, so source it yourself
+# exactly as d2-deploy does:
+#   sudo -u svc_ansible bash -c 'set -a; . ~/.config/zabbix.env; . ~/.config/netbox.env; set +a; \
+#     cd /opt/ansible; ansible-playbook -i inventory/netbox.yml ansible/enroll-radsec-pi.yml -l <pi>'
+# `-e zabbix_api_token=<token>` still works and takes precedence.
 - name: Issue RadSec cert + monitoring on enrolled Pi(s)
   hosts: "{{ target | default('radsec_pending') }}"
   become: false
   gather_facts: false
   vars:
     zabbix_api_url: "https://10.255.255.4/api_jsonrpc.php"
+    zabbix_api_token: "{{ lookup('ansible.builtin.env', 'ZBX_TOKEN') }}"
+    # Kept in one place so the create and the final verify cannot drift apart.
+    radsec_item_key: radsec.cert.daysleft
+    radsec_triggers:
+      - description: "RadSec cert expiring on {HOST.NAME} (<=10d, renewal overdue)"
+        expression: "last(/{{ inventory_hostname }}/radsec.cert.daysleft)<=10 and last(/{{ inventory_hostname }}/radsec.cert.daysleft)>5"
+        priority: 2
+      - description: "RadSec cert CRITICALLY expiring on {HOST.NAME} (<=5d)"
+        expression: "last(/{{ inventory_hostname }}/radsec.cert.daysleft)<=5"
+        priority: 4
   tasks:
+    # --- Preflight: everything that must be true BEFORE a cert exists ---------
+    - name: Require a Zabbix API token (the monitoring half is not optional)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.assert:
+        that: zabbix_api_token | length > 0
+        fail_msg: >-
+          No Zabbix API token: source ~/.config/zabbix.env (ZBX_TOKEN) on the
+          control node, or pass -e zabbix_api_token=<token>. Refusing to issue a
+          cert without creating its expiry monitoring -- that renews blind.
+
+    # Doubles as the reachability + auth + host-exists probe. The API returns
+    # HTTP 200 for logical errors too, so every call is judged on the JSON body.
+    - name: "Preflight: Zabbix hostid lookup (also proves API reachability + token)"
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        validate_certs: false
+        status_code: 200
+        timeout: 15
+        headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
+        body_format: json
+        body: { jsonrpc: "2.0", method: host.get, params: { output: [hostid], filter: { host: ["{{ inventory_hostname }}"] } }, id: 1 }
+      register: zbx_host
+      failed_when: >-
+        zbx_host.json is not defined
+        or zbx_host.json.error is defined
+        or (zbx_host.json.result | default([]) | length) != 1
+
+    # --- Issuance -------------------------------------------------------------
     - name: Read the Pi DNS-01 pubkey + CERT_NAME (no privilege; /etc/lego is 0755)
       ansible.builtin.slurp: { src: "{{ item }}" }
       loop: [ /etc/lego/ssh_id.pub, /etc/lego/radsec.env ]
@@ -36,46 +98,102 @@
       changed_when: "enroll.rc == 0 and 'nothing to do' not in (enroll.stdout | default(''))"
       failed_when: enroll.rc != 0
 
-    - name: Zabbix hostid lookup
+    # --- Monitoring -----------------------------------------------------------
+    # "already exists" is the idempotent re-run path; any other API error is real
+    # and must stop the play.
+    - name: Zabbix trapper item
       delegate_to: localhost
       ansible.builtin.uri:
         url: "{{ zabbix_api_url }}"
         method: POST
         validate_certs: false
-        headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
-        body_format: json
-        body: { jsonrpc: "2.0", method: host.get, params: { output: [hostid], filter: { host: ["{{ inventory_hostname }}"] } }, id: 1 }
-      register: zbx_host
-      when: zabbix_api_token is defined
-    - name: Zabbix trapper item (ignore if exists)
-      delegate_to: localhost
-      ansible.builtin.uri:
-        url: "{{ zabbix_api_url }}"
-        method: POST
-        validate_certs: false
+        status_code: 200
+        timeout: 15
         headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
         body_format: json
         body:
           jsonrpc: "2.0"
           method: item.create
-          params: { name: "RadSec cert days to expiry", key_: "radsec.cert.daysleft", hostid: "{{ zbx_host.json.result[0].hostid }}", type: 2, value_type: 0, units: days }
+          params:
+            name: "RadSec cert days to expiry"
+            key_: "{{ radsec_item_key }}"
+            hostid: "{{ zbx_host.json.result[0].hostid }}"
+            type: 2
+            value_type: 0
+            units: days
+            description: >-
+              Days until the Pi RadSec client cert expires. Pushed daily by
+              radsec-cert-check via zabbix_sender. Healthy cert renews at 15d
+              (lego); <=10d => renewal failing - check lego-radsec.timer + the
+              ca.internal /etc/hosts pin.
           id: 2
-      failed_when: false
-      when: zabbix_api_token is defined and zbx_host.json.result | length > 0
-    - name: Zabbix triggers warn<=10>5 + high<=5 (ignore if exist)
+      register: zbx_item
+      changed_when: zbx_item.json.result is defined
+      failed_when: >-
+        zbx_item.json is not defined
+        or (zbx_item.json.error is defined
+            and 'already exists' not in (zbx_item.json.error.data | default('')))
+
+    # One call per trigger: trigger.create is all-or-nothing on a list, so a Pi
+    # left holding only one of the pair would keep erroring "already exists" and
+    # never gain the missing one.
+    - name: Zabbix triggers warn<=10>5 + high<=5
       delegate_to: localhost
       ansible.builtin.uri:
         url: "{{ zabbix_api_url }}"
         method: POST
         validate_certs: false
+        status_code: 200
+        timeout: 15
         headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
         body_format: json
         body:
           jsonrpc: "2.0"
           method: trigger.create
           params:
-            - { description: "RadSec cert expiring on {HOST.NAME} (<=10d, renewal overdue)", expression: "last(/{{ inventory_hostname }}/radsec.cert.daysleft)<=10 and last(/{{ inventory_hostname }}/radsec.cert.daysleft)>5", priority: 2, manual_close: 1 }
-            - { description: "RadSec cert CRITICALLY expiring on {HOST.NAME} (<=5d)", expression: "last(/{{ inventory_hostname }}/radsec.cert.daysleft)<=5", priority: 4, manual_close: 1 }
+            description: "{{ item.description }}"
+            expression: "{{ item.expression }}"
+            priority: "{{ item.priority }}"
+            manual_close: 1
           id: 3
-      failed_when: false
-      when: zabbix_api_token is defined and zbx_host.json.result | length > 0
+      loop: "{{ radsec_triggers }}"
+      loop_control:
+        label: "{{ item.description }}"
+      register: zbx_trigger
+      changed_when: zbx_trigger.json.result is defined
+      failed_when: >-
+        zbx_trigger.json is not defined
+        or (zbx_trigger.json.error is defined
+            and 'already exists' not in (zbx_trigger.json.error.data | default('')))
+
+    - name: Verify the monitoring is actually in place (item + both triggers)
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        validate_certs: false
+        status_code: 200
+        timeout: 15
+        headers: { Authorization: "Bearer {{ zabbix_api_token }}", Content-Type: "application/json-rpc" }
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: item.get
+          params:
+            output: [itemid, key_]
+            hostids: ["{{ zbx_host.json.result[0].hostid }}"]
+            filter: { key_: ["{{ radsec_item_key }}"] }
+            selectTriggers: [triggerid]
+          id: 4
+      register: zbx_verify
+      failed_when: >-
+        zbx_verify.json is not defined
+        or zbx_verify.json.error is defined
+        or (zbx_verify.json.result | default([]) | length) != 1
+        or ((zbx_verify.json.result[0].triggers | default([]) | length) < 2)
+
+    - name: Monitoring summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ radsec_item_key }} itemid={{ zbx_verify.json.result[0].itemid }}
+          triggers={{ zbx_verify.json.result[0].triggers | length }}
