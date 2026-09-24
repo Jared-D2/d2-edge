@@ -30,8 +30,12 @@
 # stock .bashrc early-returns for non-interactive shells, so source it yourself
 # exactly as d2-deploy does:
 #   sudo -u svc_ansible bash -c 'set -a; . ~/.config/zabbix.env; . ~/.config/netbox.env; set +a; \
-#     cd /opt/ansible; ansible-playbook -i inventory/netbox.yml ansible/enroll-radsec-pi.yml -l <pi>'
+#     cd /opt/ansible; ansible-playbook -i inventory/netbox.yml playbooks/enroll-radsec-pi.yml -l <pi>'
 # `-e zabbix_api_token=<token>` still works and takes precedence.
+#
+# This file is the source of truth; .3 carries a plain copy at
+# /opt/ansible/playbooks/enroll-radsec-pi.yml (/opt/ansible is not a git repo),
+# so re-copy it there after any change.
 - name: Issue RadSec cert + monitoring on enrolled Pi(s)
   hosts: "{{ target | default('radsec_pending') }}"
   become: false
